@@ -166,3 +166,4 @@ table{width:100%;border-collapse:collapse} td{padding:6px 8px;border-bottom:1px 
   .modal{max-height:none;border:0}
   .modal .foot{display:none}
 }
+.narrow{max-width:760px}
