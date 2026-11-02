@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'">
+<title>Privacidade · FileLife</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="wrap" style="max-width:760px">
+<p><a href="./">← Voltar ao FileLife</a></p>
+<h1>Política de Privacidade</h1>
+<p class="muted">Última atualização: novembro de 2026</p>
+
+<h2>Resumo</h2>
+<p>O FileLife roda inteiramente no seu navegador. <b>Não existe servidor do FileLife</b>: não coletamos, não
+recebemos e não guardamos seus arquivos, seus dados de conta nem informações de uso.</p>
+
+<h2>Acesso ao Google Drive</h2>
+<ul>
+  <li>Ao clicar em “Entrar com Google”, você autoriza o FileLife a usar a permissão <code>drive.file</code>. Com ela,
+    o FileLife só consegue ver e alterar os arquivos e pastas que <b>ele mesmo criou</b> no seu Drive (a pasta “FileLife”).
+    O resto do seu Drive fica fora do alcance dele.</li>
+  <li>O FileLife usa esse acesso apenas para: enviar os arquivos que você escolher, organizá-los em pastas, gravar
+    o prazo de validade e a categoria de cada um (como propriedades do próprio arquivo), mover arquivos expirados para
+    a pasta “_ArquivoFrio” ou para a lixeira do Drive, e salvar suas configurações em “FileLife/_filelife_config.json”.</li>
+  <li>O token de acesso do Google fica só na memória da aba aberta e some quando você fecha a aba ou clica em “Sair”.
+    O “Sair” também revoga o token.</li>
+  <li>O uso de dados recebidos das APIs do Google segue a
+    <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener noreferrer">Política de Dados do Usuário dos Serviços de API do Google</a>,
+    incluindo os requisitos de Uso Limitado. Os dados não são transferidos a terceiros, usados para publicidade nem lidos por pessoas.</li>
+</ul>
+
+<h2>Arquivos do seu computador</h2>
+<p>Se você conectar uma pasta do computador (Chrome/Edge), o navegador pede sua permissão. O FileLife lê os arquivos
+dessa pasta apenas para enviá-los ao seu Drive. Ele só remove a cópia do computador depois de confirmar, pela impressão
+digital SHA-256, que o arquivo chegou idêntico ao Drive, e você pode desligar essa remoção nas Configurações.</p>
+
+<h2>Resumo com Inteligência Artificial (opcional)</h2>
+<p>Desligado até você colar uma chave própria da Anthropic. A chave fica salva apenas no seu navegador. Ao pedir um
+resumo, o conteúdo daquele documento é enviado diretamente do seu navegador para a Anthropic (Claude), sob os
+<a href="https://www.anthropic.com/legal/commercial-terms" rel="noopener noreferrer">termos da Anthropic</a>. O resumo
+é gravado na descrição do arquivo, no seu Drive.</p>
+
+<h2>Dados guardados no seu navegador</h2>
+<p>A chave da Anthropic (se você escolher “lembrar”), a pasta do computador conectada e uma marcação de que você já
+usou o site. Você pode apagar tudo limpando os dados do site no navegador.</p>
+
+<h2>Seus direitos (LGPD)</h2>
+<p>Como não guardamos dados pessoais seus, não há dados nossos a consultar, corrigir ou apagar. Para remover tudo o
+que o FileLife criou, apague a pasta “FileLife” no seu Drive e revogue o acesso em
+<a href="https://myaccount.google.com/permissions" rel="noopener noreferrer">myaccount.google.com/permissions</a>.</p>
+
+<h2>Contato</h2>
+<p>Dúvidas: abra uma issue em <a href="https://github.com/Telsat97/FileLife" rel="noopener noreferrer">github.com/Telsat97/FileLife</a>.</p>
+</main>
+</body>
+</html>

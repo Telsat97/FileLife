@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data: https://*.googleusercontent.com; connect-src https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com https://api.anthropic.com; frame-src https://accounts.google.com/gsi/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="FileLife organiza, expira e resume seus arquivos no Google Drive. Funciona no navegador, em qualquer sistema.">
+<title>FileLife</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+<script src="js/gis-loader.js"></script>
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">F</div>
+      <div><h1>FileLife</h1><p>Seus arquivos organizados no Google Drive</p></div>
+    </div>
+    <div id="account"></div>
+  </header>
+
+  <!-- Tela de entrada -->
+  <section id="login-screen" class="hero">
+    <h2>Seus arquivos se organizam sozinhos.</h2>
+    <p class="lead">O FileLife organiza seus arquivos em pastas no Google Drive, dá um prazo de validade a cada um,
+      evita cópias repetidas e libera espaço no computador. Funciona em qualquer sistema, direto no navegador.</p>
+    <button class="google-btn js-login" type="button">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+      Entrar com Google
+    </button>
+    <p id="setup-warning" class="warn" hidden>⚙️ Site ainda não configurado: falta o ID do cliente do Google em <code>config.js</code> (veja o README).</p>
+    <div class="features">
+      <div class="card feature"><b>🔒 Privado de verdade</b><span>Não existe servidor do FileLife. Seus arquivos vão direto do seu navegador para o seu Drive.</span></div>
+      <div class="card feature"><b>🧹 Prazo de validade</b><span>Cada arquivo tem um prazo. Depois dele, vai para o Arquivo Frio, e nada se perde.</span></div>
+      <div class="card feature"><b>♻️ Sem duplicatas</b><span>O mesmo arquivo nunca é guardado duas vezes.</span></div>
+      <div class="card feature"><b>🧠 Resumo com IA</b><span>PDFs longos resumidos em 3 tópicos (opcional, com a sua chave).</span></div>
+    </div>
+    <p class="muted small">O FileLife só consegue ver os arquivos que ele mesmo criou no seu Drive. <a href="privacy.html">Privacidade</a> · <a href="terms.html">Termos</a></p>
+  </section>
+
+  <!-- Aplicativo -->
+  <section id="app-screen" hidden>
+    <div class="toolbar">
+      <button id="btn-report" class="btn" type="button">📊 Relatório</button>
+      <button id="btn-settings" class="btn" type="button">⚙️ Configurações</button>
+    </div>
+
+    <section class="stats" id="stats"></section>
+
+    <div class="grid">
+      <div class="col">
+        <div id="dropzone" class="card dropzone" role="button" tabindex="0" aria-label="Enviar arquivos">
+          <b>⬆️ Arraste arquivos aqui</b>
+          <span class="muted small">ou clique para escolher. Eles vão para o Drive organizados por categoria.</span>
+          <input id="file-input" type="file" multiple hidden>
+        </div>
+        <div id="local" class="card local"></div>
+
+        <section class="card">
+          <div class="panel-head">
+            <div class="tabs">
+              <button class="tab" data-tab="active" type="button">Arquivos</button>
+              <button class="tab" data-tab="archived" type="button">🧊 Arquivo Frio<span id="tab-archived-count"></span></button>
+            </div>
+            <div class="tools">
+              <input id="search" class="search" type="search" placeholder="Buscar arquivo..." aria-label="Buscar arquivo">
+              <button id="btn-cleanup" class="btn small" type="button">🧹 Limpar expirados</button>
+            </div>
+          </div>
+          <div class="chips" id="chips"></div>
+          <ul class="files" id="files"></ul>
+        </section>
+      </div>
+      <aside class="card">
+        <div class="panel-head"><h3>Atividade</h3></div>
+        <ul class="feed" id="feed"></ul>
+      </aside>
+    </div>
+    <p class="muted small center"><a href="privacy.html">Privacidade</a> · <a href="terms.html">Termos</a></p>
+  </section>
+</div>
+
+<div id="busy" class="busy" hidden><span class="spin"></span> <span id="busy-label">Trabalhando...</span></div>
+<div id="overlay" class="overlay"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
