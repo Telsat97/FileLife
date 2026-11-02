@@ -12,6 +12,7 @@ Uso:
 
 import argparse
 import collections
+import contextlib
 import datetime
 import hashlib
 import json
@@ -20,7 +21,9 @@ import queue
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -39,6 +42,10 @@ CONFIG_PATH = APP_DIR / "config.json"
 ORGANIZED_DIR = Path.home() / "OrganizedFiles"
 COLD_DIR = ORGANIZED_DIR / "_ArquivoFrio"
 REPORTS_DIR = ORGANIZED_DIR / "_Relatorios"
+TRASH_DIR = APP_DIR / "lixeira"          # nada é apagado de vez: vai pra cá por 30 dias
+STATE_PATH = APP_DIR / "state.json"
+TRASH_DAYS = 30
+LOG_DAYS = 90
 
 DAY = 86400
 
@@ -75,11 +82,12 @@ DEFAULT_CONFIG = {
     "cleanup_interval": 3600,
     # Minutos economizados por arquivo organizado (usado no relatório)
     "minutes_saved_per_file": 1.5,
-    # Função 2: resumo com IA (precisa de `pip install anthropic` + ANTHROPIC_API_KEY)
-    "ai_summary": True,
+    # Função 2: resumo com IA (precisa de `pip install anthropic` + ANTHROPIC_API_KEY).
+    # Desligado por padrão: quando ligado, o conteúdo dos documentos é enviado à Anthropic.
+    "ai_summary": False,
     "ai_model": "claude-opus-5-5",
     "ai_categories": ["Documentos"],
-    "ai_max_mb": 30,
+    "ai_max_mb": 20,  # a API aceita até 32 MB por pedido (PDF em base64 cresce ~33%)
     # Função 4: Cloud Bridge — manda arquivos grandes para a nuvem.
     # cloud_mode "api": envia direto ao Google Drive pela internet (sem instalar app;
     #   abre no navegador). "pasta": usa a pasta do app Drive/OneDrive/Dropbox.
@@ -104,7 +112,13 @@ CATEGORIES = {
     "Instaladores": {".exe", ".msi", ".dmg", ".pkg", ".deb", ".appimage"},
 }
 
-TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".partial")
+TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".partial", ".opdownload")
+SYSTEM_FILES = {"desktop.ini", "thumbs.db", ".ds_store", "icon\r"}
+# Abrir estes tipos executaria um programa: a interface mostra a pasta em vez disso
+RISKY_EXTS = {".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".vbe", ".js",
+              ".jse", ".wsf", ".wsh", ".hta", ".jar", ".lnk", ".url", ".reg", ".pif", ".cpl",
+              ".msc", ".app", ".command", ".sh", ".pkg", ".dmg", ".appimage", ".deb", ".rpm"}
+MIN_FILE_AGE = 5  # segundos sem mudanças antes de mexer no arquivo
 
 DB_LOCK = threading.RLock()
 PRINT_LOCK = threading.Lock()
@@ -114,7 +128,16 @@ PRINT_LOCK = threading.Lock()
 ACTIVITY = collections.deque(maxlen=200)
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean_text(text):
+    """Remove caracteres de controle (evita sequências de escape no terminal)."""
+    return _CONTROL_CHARS.sub("", str(text))
+
+
 def say(msg):
+    msg = clean_text(msg)
     with PRINT_LOCK:
         ACTIVITY.append({"ts": int(time.time()), "msg": msg})
         try:
@@ -123,18 +146,85 @@ def say(msg):
             pass
 
 
+def make_private_dir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+
+
+def write_private(path, text):
+    """Grava um arquivo legível só pelo seu usuário (tokens, banco, config)."""
+    make_private_dir(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)  # escrita atômica: nunca deixa o arquivo pela metade
+
+
+ENUMS = {"on_expire": ("archive", "delete"), "dedupe": ("keep_old", "keep_new"),
+         "cloud_mode": ("api", "pasta"), "cloud_provider": ("google_drive", "outro")}
+NUMBERS = {"versioning_max_mb": (0, 10_000), "max_versions": (1, 1000),
+           "scan_interval": (1, 3600), "cleanup_interval": (60, 7 * 86400),
+           "minutes_saved_per_file": (0, 60), "ai_max_mb": (1, 24),
+           "cloud_min_mb": (0, 1_000_000)}
+
+
+def validate_config(cfg):
+    """Corrige valores inválidos (arquivo editado à mão ou corrompido) para os padrões."""
+    problems = []
+    for key, default in DEFAULT_CONFIG.items():
+        if key not in cfg or type(cfg[key]) is not type(default) and not (
+                isinstance(default, float) and isinstance(cfg[key], int)):
+            if key in cfg:
+                problems.append(key)
+            cfg[key] = json.loads(json.dumps(default))
+    for key, allowed in ENUMS.items():
+        if cfg[key] not in allowed:
+            problems.append(key)
+            cfg[key] = DEFAULT_CONFIG[key]
+    for key, (lo, hi) in NUMBERS.items():
+        if not lo <= cfg[key] <= hi:
+            problems.append(key)
+            cfg[key] = DEFAULT_CONFIG[key]
+    expiry = {}
+    for cat, default in DEFAULT_CONFIG["default_expiry"].items():
+        value = cfg["default_expiry"].get(cat, default)
+        try:
+            parse_duration(str(value))
+            expiry[cat] = str(value)
+        except ValueError:
+            problems.append(f"default_expiry.{cat}")
+            expiry[cat] = default
+    cfg["default_expiry"] = expiry
+    for key in ("cloud_categories", "ai_categories", "versioning_categories"):
+        cfg[key] = [c for c in cfg[key] if isinstance(c, str)]
+    if not all(isinstance(w, list) for w in cfg["tags"].values()):
+        problems.append("tags")
+        cfg["tags"] = json.loads(json.dumps(DEFAULT_CONFIG["tags"]))
+    if cfg["watch_dir"]:
+        reason = unsafe_watch_reason(Path(cfg["watch_dir"]).expanduser())
+        if reason:
+            problems.append(f"watch_dir ({reason})")
+            cfg["watch_dir"] = ""
+    return problems
+
+
 def load_config():
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    make_private_dir(APP_DIR)
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if CONFIG_PATH.exists():
         try:
             user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(user, dict):
+                raise ValueError("formato inválido")
             cfg.update(user)
-        except (json.JSONDecodeError, OSError) as e:
+        except (ValueError, OSError) as e:
             say(f"⚠️  config.json inválido ({e}), usando padrões.")
-    else:
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False),
-                               encoding="utf-8")
+    problems = validate_config(cfg)
+    if problems:
+        say(f"⚠️  Configurações inválidas corrigidas para o padrão: {', '.join(problems)}")
+    write_private(CONFIG_PATH, json.dumps(cfg, indent=2, ensure_ascii=False))
     return cfg
 
 
@@ -142,13 +232,88 @@ CONFIG = DEFAULT_CONFIG
 
 
 def save_config(changes):
-    """Atualiza e grava a configuração (usado pela interface)."""
-    CONFIG.update(changes)
-    CONFIG_PATH.write_text(json.dumps(CONFIG, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Valida, atualiza e grava a configuração (usado pela interface)."""
+    new = dict(CONFIG)
+    new.update(changes)
+    problems = validate_config(new)
+    if problems:
+        raise ValueError(f"Valor inválido: {', '.join(problems)}")
+    CONFIG.clear()
+    CONFIG.update(new)
+    write_private(CONFIG_PATH, json.dumps(CONFIG, indent=2, ensure_ascii=False))
+
+
+def _system_dirs():
+    dirs = [Path("/"), Path("/usr"), Path("/etc"), Path("/bin"), Path("/var"),
+            Path("/System"), Path("/Library"), Path("/Applications"), Path("/opt")]
+    for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData",
+                "APPDATA", "LOCALAPPDATA"):
+        if os.environ.get(var):
+            dirs.append(Path(os.environ[var]))
+    return dirs
+
+
+def unsafe_watch_reason(folder):
+    """Motivo pelo qual não é seguro monitorar esta pasta (ou None se for segura)."""
+    try:
+        folder = folder.expanduser().resolve()
+    except OSError:
+        return "pasta inválida"
+    home = Path.home().resolve()
+    if folder == home:
+        return "não é permitido monitorar a pasta pessoal inteira"
+    if folder.parent == folder or (os.name == "nt" and len(folder.parts) <= 1):
+        return "não é permitido monitorar a raiz do disco"
+    for d in _system_dirs():
+        try:
+            d = d.resolve()
+        except OSError:
+            continue
+        if folder == d or (d != Path("/") and d in folder.parents):
+            return "pasta do sistema"
+    for own in (ORGANIZED_DIR, APP_DIR):
+        own = own.resolve()
+        if folder == own or own in folder.parents or folder in own.parents:
+            return "pasta usada pelo próprio FileLife"
+    return None
 
 
 def watch_folder():
     return Path(CONFIG.get("watch_dir") or Path.home() / "Downloads").expanduser()
+
+
+def load_state():
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(**changes):
+    state = load_state()
+    state.update(changes)
+    write_private(STATE_PATH, json.dumps(state))
+
+
+# --- Uma instância por vez ---------------------------------------------------
+_INSTANCE_SOCKET = None
+INSTANCE_PORT = 47862
+
+
+def acquire_single_instance():
+    """Garante que só um FileLife rode por vez (dois mexendo nos mesmos arquivos = bagunça)."""
+    global _INSTANCE_SOCKET
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        sock.bind(("127.0.0.1", INSTANCE_PORT))
+        sock.listen(1)
+    except OSError:
+        sock.close()
+        return False
+    _INSTANCE_SOCKET = sock
+    return True
 
 
 def start_background(organize_existing=False, folder=None):
@@ -157,7 +322,11 @@ def start_background(organize_existing=False, folder=None):
     CONFIG = load_config()
     init_db()
     folder = Path(folder).expanduser() if folder else watch_folder()
+    reason = unsafe_watch_reason(folder)
+    if reason:
+        raise SystemExit(f"Pasta {folder} recusada: {reason}.")
     folder.mkdir(parents=True, exist_ok=True)
+    purge_old_files()
     threading.Thread(target=summary_worker, daemon=True).start()
     threading.Thread(target=upload_worker, daemon=True).start()
     watcher = Watcher(folder, organize_existing=organize_existing)
@@ -166,24 +335,82 @@ def start_background(organize_existing=False, folder=None):
 
 
 def log_action(message):
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = LOG_DIR / f"lifecycle_{datetime.date.today()}.log"
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n")
+    try:
+        make_private_dir(LOG_DIR)
+        log_file = LOG_DIR / f"lifecycle_{datetime.date.today()}.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {clean_text(message)}\n")
+    except OSError:
+        pass  # log nunca pode derrubar o programa
+
+
+def safe_delete(path):
+    """Nunca apaga de vez: manda para a Lixeira do sistema (se `send2trash` estiver
+    instalado) ou para ~/.filelife/lixeira, que é esvaziada após 30 dias."""
+    path = Path(path)
+    if not (path.exists() or path.is_symlink()):
+        return
+    try:
+        from send2trash import send2trash
+        send2trash(str(path))
+        return
+    except ImportError:
+        pass
+    except Exception as e:  # lixeira do sistema indisponível: usa a nossa
+        log_action(f"send2trash falhou para {path}: {e!r}")
+    day_dir = TRASH_DIR / datetime.date.today().isoformat()
+    make_private_dir(day_dir)
+    dest = unique_path(day_dir / path.name)
+    shutil.move(str(path), str(dest))
+    log_action(f"Movido para a lixeira do FileLife: {path} -> {dest}")
+
+
+def purge_old_files():
+    """Esvazia a lixeira do FileLife (>30 dias) e logs antigos (>90 dias)."""
+    now = time.time()
+    for base, days in ((TRASH_DIR, TRASH_DAYS), (LOG_DIR, LOG_DAYS)):
+        if not base.exists():
+            continue
+        for item in base.iterdir():
+            try:
+                if now - item.stat().st_mtime > days * DAY:
+                    if item.is_dir() and not item.is_symlink():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+            except OSError as e:
+                log_action(f"Limpeza de {item} falhou: {e!r}")
+
+
+def safe_move(src, dst):
+    """Move; se falhar no meio (disco cheio, outro disco), não deixa cópia pela metade."""
+    try:
+        shutil.move(str(src), str(dst))
+    except Exception:
+        if Path(src).exists() and Path(dst).exists():
+            with contextlib.suppress(OSError):
+                Path(dst).unlink()
+        raise
 
 
 # ---------------------------------------------------------------------------
 # Banco de dados
 # ---------------------------------------------------------------------------
 
+@contextlib.contextmanager
 def db():
+    """Conexão que faz commit (ou rollback se der erro) e sempre fecha."""
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    make_private_dir(APP_DIR)
     with DB_LOCK, db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS files (
@@ -219,6 +446,8 @@ def init_db():
                 conn.execute(f"ALTER TABLE files ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass  # coluna já existe
+    if os.name != "nt":
+        os.chmod(DB_PATH, 0o600)
 
 
 def add_event(conn, kind, file_id=None, nbytes=0):
@@ -307,10 +536,21 @@ def build_new_name(filename, tag):
 # Processamento de novos arquivos
 # ---------------------------------------------------------------------------
 
+def is_same_content(row, digest):
+    """Confirma que o arquivo registrado ainda tem exatamente o mesmo conteúdo."""
+    if row["drive_id"]:
+        return True  # no Drive o arquivo não é editado pelo FileLife
+    p = Path(row["file_path"])
+    try:
+        return p.is_file() and p.stat().st_size == row["size"] and sha256_of(p) == digest
+    except OSError:
+        return False
+
+
 def process_file(path):
     """Categoriza, deduplica, renomeia, move e registra um arquivo."""
     path = Path(path)
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return
     filename = path.name
     size = path.stat().st_size
@@ -318,24 +558,29 @@ def process_file(path):
 
     # Função 1: Dedupe inteligente
     with DB_LOCK, db() as conn:
-        dup = conn.execute(
+        dups = conn.execute(
             "SELECT * FROM files WHERE sha256 = ? AND status = 'active' ORDER BY id DESC",
-            (digest,)).fetchone()
-        if dup and (dup["drive_id"] or Path(dup["file_path"]).exists()):
-            if CONFIG["dedupe"] == "keep_new" and not dup["drive_id"]:
-                Path(dup["file_path"]).unlink(missing_ok=True)
+            (digest,)).fetchall()
+    for dup in dups:
+        if not is_same_content(dup, digest):
+            continue  # o arquivo antigo foi editado depois: não é mais cópia
+        if CONFIG["dedupe"] == "keep_new" and not dup["drive_id"]:
+            safe_delete(dup["file_path"])
+            with DB_LOCK, db() as conn:
                 conn.execute("UPDATE files SET status='deleted', closed_at=? WHERE id=?",
                              (int(time.time()), dup["id"]))
                 add_event(conn, "duplicate", dup["id"], dup["size"] or 0)
-                log_action(f"Duplicata: removido antigo {dup['file_path']}, mantendo novo {filename}")
-                say(f"♻️  {filename} é cópia de um arquivo antigo — versão antiga removida.")
-            else:
-                path.unlink()
+            log_action(f"Duplicata: antigo {dup['file_path']} para a lixeira, mantendo {filename}")
+            say(f"♻️  {filename} é cópia de um arquivo antigo — a versão antiga foi para a lixeira.")
+        else:
+            safe_delete(path)
+            with DB_LOCK, db() as conn:
                 add_event(conn, "duplicate", dup["id"], size)
-                log_action(f"Duplicata: {filename} = {dup['file_path']} (novo removido)")
-                say(f"♻️  {filename} já existe em {dup['file_path']} — cópia removida "
-                    f"({human_size(size)} economizados).")
-                return
+            log_action(f"Duplicata: {filename} = {dup['file_path']} (novo para a lixeira)")
+            say(f"♻️  {filename} já existe ({dup['new_name']}) — cópia enviada para a lixeira "
+                f"({human_size(size)} economizados).")
+            return
+        break
 
     category = categorize_file(filename)
     tag = detect_tag(filename)
@@ -344,11 +589,10 @@ def process_file(path):
     new_path = unique_path(target_dir / build_new_name(filename, tag))
 
     try:
-        shutil.move(str(path), str(new_path))
+        safe_move(path, new_path)
     except OSError as e:
         log_action(f"Erro ao mover {path}: {e}")
-        say(f"❌ Não consegui mover {filename}: {e}")
-        return
+        raise
 
     secs = parse_duration(CONFIG["default_expiry"].get(category, "1w"))
     now = int(time.time())
@@ -431,6 +675,8 @@ def restore_version(file_id, index):
         raise ValueError("Sem versões para esse arquivo.")
     if not 1 <= index <= len(versions):
         raise ValueError(f"Escolha uma versão entre 1 e {len(versions)}.")
+    if row["file_path"].startswith("gdrive://"):
+        raise ValueError("Esse arquivo está no Google Drive; use o histórico de versões do Drive.")
     target = Path(row["file_path"])
     if target.exists():
         snapshot_version(file_id, target, "Documentos")  # guarda o estado atual antes
@@ -452,20 +698,43 @@ def archive_file(path, extras=(), cold_dir=None):
     zip_path = unique_path(month_dir / f"{path.stem}.zip")
     password = None
     try:
-        import pyzipper  # opcional
-        password = secrets.token_urlsafe(12)
-        with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED,
-                                 encryption=pyzipper.WZ_AES) as zf:
-            zf.setpassword(password.encode())
-            for f in [path, *extras]:
-                zf.write(f, f.name)
-    except ImportError:
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for f in [path, *extras]:
-                zf.write(f, f.name)
+        try:
+            import pyzipper  # opcional
+        except ImportError:
+            pyzipper = None
+        if pyzipper:
+            password = secrets.token_urlsafe(12)
+            with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED,
+                                     encryption=pyzipper.WZ_AES) as zf:
+                zf.setpassword(password.encode())
+                for f in [path, *extras]:
+                    zf.write(f, f.name)
+            with pyzipper.AESZipFile(zip_path) as zf:
+                zf.setpassword(password.encode())
+                bad = zf.testzip()
+        else:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for f in [path, *extras]:
+                    zf.write(f, f.name)
+            with zipfile.ZipFile(zip_path) as zf:
+                bad = zf.testzip()
+        if bad is not None:
+            raise OSError(f"zip corrompido ({bad})")
+    except Exception:
+        with contextlib.suppress(OSError):
+            zip_path.unlink()  # sem zip pela metade; o original continua intacto
+        raise
+    # Só remove os originais depois de confirmar que o zip está íntegro
     for f in [path, *extras]:
         f.unlink()
     return zip_path, password
+
+
+def remove_versions(file_id):
+    vdir = VERSIONS_DIR / str(file_id)
+    if vdir.exists():
+        with contextlib.suppress(OSError):
+            safe_delete(vdir)
 
 
 def run_cleanup(verbose=True):
@@ -491,9 +760,9 @@ def run_cleanup(verbose=True):
                              (now, r["id"]))
             continue
         size = p.stat().st_size
-        remove_shortcut(r["shortcut_path"])
         try:
-            if CONFIG["on_expire"] == "archive":
+            remove_shortcut(r["shortcut_path"])
+            if CONFIG["on_expire"] != "delete":  # qualquer valor estranho = arquivar (seguro)
                 # Arquivos na nuvem continuam na nuvem (não ocupam o SSD de novo)
                 cold = p.parent.parent / "_ArquivoFrio" if r["cloud"] else None
                 zip_path, pwd = archive_file(p, [r["summary_path"]], cold)
@@ -505,15 +774,16 @@ def run_cleanup(verbose=True):
                 log_action(f"Arquivado #{r['id']} {p.name} -> {zip_path}")
                 say(f"🧊 #{r['id']} {p.name} expirou → Arquivo Frio ({zip_path.name})")
             else:
-                p.unlink()
+                safe_delete(p)
                 if r["summary_path"]:
-                    Path(r["summary_path"]).unlink(missing_ok=True)
+                    safe_delete(r["summary_path"])
                 with DB_LOCK, db() as conn:
                     conn.execute("UPDATE files SET status='deleted', closed_at=? WHERE id=?",
                                  (now, r["id"]))
                     add_event(conn, "deleted", r["id"], size)
-                log_action(f"Deletado #{r['id']} {p}")
-                say(f"🗑️  #{r['id']} {p.name} expirou e foi removido")
+                log_action(f"Expirado #{r['id']} {p} -> lixeira")
+                say(f"🗑️  #{r['id']} {p.name} expirou e foi para a lixeira")
+            remove_versions(r["id"])
         except OSError as e:
             log_action(f"Erro ao expirar #{r['id']} {p}: {e}")
             say(f"❌ Erro ao expirar {p.name}: {e}")
@@ -547,7 +817,13 @@ def extract_docx_text(path):
     from xml.etree import ElementTree
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     with zipfile.ZipFile(path) as zf:
-        root = ElementTree.fromstring(zf.read("word/document.xml"))
+        info = zf.getinfo("word/document.xml")
+        if info.file_size > 50 * 1024 * 1024:  # proteção contra "zip bomb"
+            raise ValueError("docx grande demais")
+        data = zf.read(info)
+    if b"<!DOCTYPE" in data[:4096].upper() or b"<!ENTITY" in data.upper():
+        raise ValueError("docx com entidades XML (bloqueado por segurança)")
+    root = ElementTree.fromstring(data)
     paragraphs = []
     for p in root.iter(f"{ns}p"):
         text = "".join(t.text or "" for t in p.iter(f"{ns}t"))
@@ -596,7 +872,7 @@ def summarize_file(file_id):
         return None
     try:
         block = build_document_block(path)
-    except (ValueError, OSError, zipfile.BadZipFile, KeyError) as e:
+    except (ValueError, OSError, zipfile.BadZipFile, KeyError, SyntaxError) as e:
         log_action(f"Resumo #{file_id} pulado: {e}")
         return None
     if block is None:
@@ -633,7 +909,7 @@ def summarize_file(file_id):
     if response.stop_reason == "refusal":
         log_action(f"Resumo #{file_id}: modelo recusou o conteúdo")
         return None
-    text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    text = clean_text("\n".join(b.text for b in response.content if b.type == "text")).strip()
     if not text:
         return None
 
@@ -647,7 +923,7 @@ def summarize_file(file_id):
 
 
 def enqueue_summary(file_id):
-    if CONFIG["ai_summary"]:
+    if CONFIG["ai_summary"] is True:
         SUMMARY_QUEUE.put(file_id)
 
 
@@ -728,9 +1004,10 @@ def create_shortcut(link_path, target):
 
 
 def remove_shortcut(shortcut_path):
+    """Remove só atalhos (.url/.webloc/link simbólico) — nunca um arquivo de verdade."""
     if shortcut_path:
         p = Path(shortcut_path)
-        if p.is_symlink() or p.exists():
+        if p.is_symlink() or (p.is_file() and p.suffix.lower() in (".url", ".webloc")):
             p.unlink()
 
 
@@ -744,7 +1021,7 @@ def send_to_cloud_folder(file_id, path):
     dest_dir = cloud_root / "FileLife" / path.parent.name
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = unique_path(dest_dir / path.name)
-    shutil.move(str(path), str(dest))
+    safe_move(path, dest)
     shortcut = create_shortcut(path, dest)
     with DB_LOCK, db() as conn:
         conn.execute("UPDATE files SET file_path=?, shortcut_path=?, cloud=1, mtime=? WHERE id=?",
@@ -782,8 +1059,11 @@ def drive_login():
         raise ValueError(f"coloque o arquivo de credenciais do Google em {DRIVE_CREDENTIALS} "
                          "(veja o README, seção Google Drive)")
     flow = InstalledAppFlow.from_client_secrets_file(str(DRIVE_CREDENTIALS), DRIVE_SCOPES)
-    creds = flow.run_local_server(port=0)
-    DRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+    creds = flow.run_local_server(port=0, bind_addr="127.0.0.1",
+                                  authorization_prompt_message="",
+                                  success_message="Pronto! Pode fechar esta aba e voltar ao FileLife.")
+    write_private(DRIVE_TOKEN, creds.to_json())
+    _folder_cache.clear()
     return creds
 
 
@@ -795,7 +1075,7 @@ def drive_service():
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            DRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+            write_private(DRIVE_TOKEN, creds.to_json())
         else:
             raise ValueError("login do Google Drive expirou — digite 'drive login'")
     return build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -853,13 +1133,17 @@ def drive_folder(service, name, parent="root"):
 
 def create_web_shortcut(link_path, url):
     """Atalho que abre o arquivo no navegador (drive.google.com)."""
+    from xml.sax.saxutils import escape as xml_escape
+    if not url.startswith("https://"):
+        raise ValueError("link inesperado do Google Drive")
+    url = url.replace("\r", "").replace("\n", "")
     link_path = Path(link_path)
     if sys.platform == "darwin":
         link = unique_path(link_path.with_name(link_path.name + ".webloc"))
         link.write_text('<?xml version="1.0" encoding="UTF-8"?>\n'
                         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                         '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                        f'<plist version="1.0"><dict><key>URL</key><string>{url}</string>'
+                        f'<plist version="1.0"><dict><key>URL</key><string>{xml_escape(url)}</string>'
                         '</dict></plist>\n', encoding="utf-8")
     else:
         link = unique_path(link_path.with_name(link_path.name + ".url"))
@@ -868,38 +1152,73 @@ def create_web_shortcut(link_path, url):
 
 
 def upload_to_drive(file_id, path):
-    """Envia o arquivo ao Google Drive, apaga a cópia local e deixa um atalho web."""
+    """Envia ao Google Drive, confere a integridade e só então apaga a cópia local."""
     _, _, _, _, MediaFileUpload = _drive_libs()
-    path = Path(path)
+    with DB_LOCK, db() as conn:
+        row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row or row["status"] != "active" or row["cloud"]:
+        return None  # já expirou, foi apagado ou já está na nuvem
+    path = Path(row["file_path"])
+    if not path.is_file():
+        return None
+    size = path.stat().st_size
+    local_md5 = hashlib.md5(usedforsecurity=False) if sys.version_info >= (3, 9) else hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            local_md5.update(block)
+
     service = drive_service()
     root = drive_folder(service, CONFIG["drive_folder"])
     parent = drive_folder(service, path.parent.name, root)
     media = MediaFileUpload(str(path), resumable=True, chunksize=16 * 1024 * 1024)
-    request = service.files().create(body={"name": path.name, "parents": [parent]},
-                                     media_body=media, fields="id, webViewLink")
-    result = None
-    while result is None:
-        _, result = request.next_chunk()
-    media.stream().close()  # libera o arquivo (necessário no Windows antes de apagar)
-    size = path.stat().st_size
-    path.unlink()
+    try:
+        request = service.files().create(body={"name": path.name, "parents": [parent]},
+                                         media_body=media,
+                                         fields="id, webViewLink, md5Checksum, size")
+        result = None
+        while result is None:
+            _, result = request.next_chunk()
+    finally:
+        media.stream().close()  # libera o arquivo (necessário no Windows antes de apagar)
+
+    if result.get("md5Checksum") != local_md5.hexdigest() or int(result.get("size", -1)) != size:
+        with contextlib.suppress(Exception):
+            service.files().update(fileId=result["id"], body={"trashed": True}).execute()
+        raise OSError("o arquivo chegou diferente no Drive; a cópia local foi mantida")
+    if path.stat().st_size != size:
+        raise OSError("o arquivo mudou durante o envio; a cópia local foi mantida")
+
     shortcut = create_web_shortcut(path, result["webViewLink"])
+    path.unlink()  # seguro: o Drive confirmou o mesmo conteúdo (md5 + tamanho)
     with DB_LOCK, db() as conn:
         conn.execute("UPDATE files SET file_path=?, shortcut_path=?, cloud=1, drive_id=?, "
                      "drive_link=? WHERE id=?",
                      (f"gdrive://{CONFIG['drive_folder']}/{path.parent.name}/{path.name}",
                       str(shortcut), result["id"], result["webViewLink"], file_id))
+    remove_versions(file_id)
     log_action(f"Google Drive #{file_id}: {path.name} -> {result['webViewLink']}")
-    say(f"☁️  #{file_id} {path.name} ({human_size(size)}) enviado ao Google Drive — "
-        f"abra com 'open {file_id}'")
+    say(f"☁️  #{file_id} {path.name} ({human_size(size)}) enviado ao Google Drive e conferido.")
     return result["webViewLink"]
+
+
+def requeue_cloud_candidates():
+    """Reenvia arquivos que se qualificam mas ainda estão no PC (ex.: falha de rede)."""
+    if not (CONFIG["cloud_bridge"] and CONFIG["cloud_mode"] == "api" and DRIVE_TOKEN.exists()):
+        return
+    min_bytes = CONFIG["cloud_min_mb"] * 1024 * 1024
+    with DB_LOCK, db() as conn:
+        rows = conn.execute("SELECT id, file_path, category, size FROM files "
+                            "WHERE status='active' AND cloud=0").fetchall()
+    for r in rows:
+        if r["category"] in CONFIG["cloud_categories"] and (r["size"] or 0) >= min_bytes:
+            UPLOAD_QUEUE.put((r["id"], r["file_path"]))
 
 
 def expire_drive_file(row, now):
     """Expiração de arquivo que está no Drive: move para _ArquivoFrio ou manda pra lixeira."""
     try:
         service = drive_service()
-        if CONFIG["on_expire"] == "archive":
+        if CONFIG["on_expire"] != "delete":
             root = drive_folder(service, CONFIG["drive_folder"])
             cold = drive_folder(service, "_ArquivoFrio", root)
             parents = service.files().get(fileId=row["drive_id"], fields="parents").execute()
@@ -913,12 +1232,19 @@ def expire_drive_file(row, now):
     except ValueError as e:
         _warn_once("drive", f"☁️  Google Drive: {e}")
         return
-    except Exception as e:  # erro de rede/API: tenta de novo na próxima limpeza
-        log_action(f"Expirar #{row['id']} no Drive falhou: {e!r}")
+    except Exception as e:
+        if getattr(getattr(e, "resp", None), "status", None) == 404:
+            # apagado no Drive pelo próprio usuário: só registra
+            remove_shortcut(row["shortcut_path"])
+            with DB_LOCK, db() as conn:
+                conn.execute("UPDATE files SET status='missing', closed_at=? WHERE id=?",
+                             (now, row["id"]))
+            return
+        log_action(f"Expirar #{row['id']} no Drive falhou: {e!r}")  # tenta na próxima limpeza
         return
     remove_shortcut(row["shortcut_path"])
     if row["summary_path"]:
-        Path(row["summary_path"]).unlink(missing_ok=True)
+        safe_delete(row["summary_path"])
     with DB_LOCK, db() as conn:
         conn.execute("UPDATE files SET status=?, closed_at=? WHERE id=?", (status, now, row["id"]))
         add_event(conn, kind, row["id"], 0)
@@ -953,6 +1279,8 @@ def maybe_send_to_cloud(file_id, path, category, size):
     if size < CONFIG["cloud_min_mb"] * 1024 * 1024:
         return None
     if CONFIG.get("cloud_mode", "api") == "api":
+        if not DRIVE_TOKEN.exists():
+            return None  # sem login no Google: o arquivo fica no PC
         UPLOAD_QUEUE.put((file_id, path))
         say(f"☁️  #{file_id} na fila de envio para o Google Drive...")
         return "queued"
@@ -960,6 +1288,9 @@ def maybe_send_to_cloud(file_id, path, category, size):
         dest = send_to_cloud_folder(file_id, path)
     except ValueError as e:
         _warn_once("cloud", f"☁️  Cloud Bridge: {e}")
+        return None
+    except Exception as e:
+        log_action(f"Cloud Bridge #{file_id} falhou: {e!r}")
         return None
     except OSError as e:
         log_action(f"Cloud Bridge #{file_id} falhou: {e}")
@@ -1041,24 +1372,64 @@ def weekly_report_due():
 # Monitor em segundo plano
 # ---------------------------------------------------------------------------
 
+def should_ignore(p):
+    """Arquivos que o FileLife nunca deve tocar."""
+    name = p.name.lower()
+    if (name.startswith((".", "~$", "~lock.")) or name.endswith(TEMP_SUFFIXES)
+            or name in SYSTEM_FILES):
+        return True
+    try:
+        st = p.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return True
+    attrs = getattr(st, "st_file_attributes", 0)  # Windows: ocultos/sistema
+    if attrs & (getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 2) | getattr(stat, "FILE_ATTRIBUTE_SYSTEM", 4)):
+        return True
+    return False
+
+
 class Watcher(threading.Thread):
-    """Varre a pasta periodicamente e só processa arquivos com tamanho estável
+    """Varre a pasta periodicamente e só processa arquivos parados há alguns segundos
     (evita pegar downloads ainda em andamento)."""
+
+    MAX_FAILURES = 3
 
     def __init__(self, folder, organize_existing=False):
         super().__init__(daemon=True)
         self.folder = Path(folder)
         self.stop_event = threading.Event()
-        self.pending = {}  # path -> (size, mtime)
-        self.ignored = set() if organize_existing else set(self._list())
+        self.pending = {}   # path -> (size, mtime)
+        self.failures = {}  # path -> (assinatura, tentativas)
         self.last_cleanup = 0
-        self.jobs = queue.Queue()
+        # Ignora o que já estava na pasta antes do primeiro uso. Depois disso, organiza
+        # também o que chegou enquanto o FileLife estava fechado.
+        last_run = load_state().get("last_run", {}).get(str(self.folder))
+        if organize_existing:
+            self.ignored = set()
+        elif last_run is None:
+            self.ignored = set(self._list())
+        else:
+            self.ignored = {p for p in self._list() if self._mtime(p) < last_run}
+        self._mark_run()
+
+    @staticmethod
+    def _mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+
+    def _mark_run(self):
+        state = load_state().get("last_run", {})
+        state[str(self.folder)] = time.time()
+        with contextlib.suppress(OSError):
+            save_state(last_run=state)
 
     def _list(self):
         try:
-            return {p for p in self.folder.iterdir()
-                    if p.is_file() and not p.name.startswith(".")
-                    and not p.name.lower().endswith(TEMP_SUFFIXES)}
+            return {p for p in self.folder.iterdir() if not should_ignore(p)}
         except OSError:
             return set()
 
@@ -1073,29 +1444,52 @@ class Watcher(threading.Thread):
     def tick(self):
         current = self._list()
         self.ignored &= current
+        now = time.time()
         for p in current - self.ignored:
             try:
                 st = p.stat()
             except OSError:
                 continue
             sig = (st.st_size, st.st_mtime)
-            if self.pending.get(p) == sig and st.st_size > 0:
+            failed = self.failures.get(p)
+            if failed and failed[0] == sig and failed[1] >= self.MAX_FAILURES:
+                continue  # desistiu deste arquivo até ele mudar
+            if (self.pending.get(p) == sig and st.st_size > 0
+                    and now - st.st_mtime >= MIN_FILE_AGE):
                 self.pending.pop(p, None)
-                process_file(p)
+                try:
+                    process_file(p)
+                    self.failures.pop(p, None)
+                except Exception as e:
+                    tries = (failed[1] + 1) if failed and failed[0] == sig else 1
+                    self.failures[p] = (sig, tries)
+                    log_action(f"Falha ao organizar {p} (tentativa {tries}): {e!r}")
+                    if tries >= self.MAX_FAILURES:
+                        say(f"⚠️  Não consegui organizar {p.name} (está aberto em outro "
+                            f"programa?). Ele ficou onde estava.")
             else:
                 self.pending[p] = sig
         for p in list(self.pending):
             if p not in current:
                 self.pending.pop(p)
+        for p in list(self.failures):
+            if p not in current:
+                self.failures.pop(p)
 
-        now = time.time()
         if now - self.last_cleanup >= CONFIG["cleanup_interval"]:
             self.last_cleanup = now
+            self._mark_run()
             run_cleanup(verbose=False)
             check_versions()
+            purge_old_files()
+            requeue_cloud_candidates()
             if weekly_report_due():
                 out = generate_report()
                 say(f"📊 Relatório semanal pronto: {out}")
+
+    def stop(self):
+        self._mark_run()
+        self.stop_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1646,9 @@ def main(argv=None):
                         help="organiza também os arquivos que já estão na pasta")
     args = parser.parse_args(argv)
 
+    if not acquire_single_instance():
+        print("O FileLife já está aberto em outra janela.")
+        return 1
     watcher = start_background(args.organize_existing, args.watch)
     folder = watcher.folder
     if CONFIG["cloud_bridge"] and CONFIG.get("cloud_mode", "api") == "api":
@@ -1278,7 +1675,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        watcher.stop_event.set()
+        watcher.stop()
         say("👋 Encerrando o monitor...")
 
 

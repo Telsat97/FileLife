@@ -41,6 +41,7 @@ O núcleo roda só com Python 3.8+. Extras opcionais:
 pip install -r requirements.txt
 ```
 
+- `send2trash` (recomendado): o que o FileLife remove vai para a Lixeira do Windows/Mac.
 - `anthropic`: resumo com IA. Também precisa da variável `ANTHROPIC_API_KEY` (crie uma chave em https://platform.claude.com).
 - `pyzipper`: zips do Arquivo Frio com senha AES.
 
@@ -107,3 +108,27 @@ O FileLife só consegue ver e mexer nos arquivos que ele mesmo enviou (permissã
 **Alternativa com o app do Drive instalado:** defina `"cloud_mode": "pasta"`. Nesse modo, o FileLife usa a pasta sincronizada (`G:\Meu Drive`, OneDrive ou Dropbox) em vez da API. Configure o app em "Fazer streaming de arquivos" para os arquivos não ocuparem o SSD. Para preferir OneDrive ou Dropbox, defina `"cloud_provider": "outro"`.
 
 Para mandar mais coisas para a nuvem, diminua `cloud_min_mb` ou acrescente categorias em `cloud_categories`.
+
+## Segurança e privacidade
+
+O FileLife foi feito para **nunca perder um arquivo seu**:
+
+- **Nada é apagado de vez.** Cópias repetidas e arquivos expirados no modo "apagar" vão para a Lixeira do sistema (com `send2trash`) ou para `~/.filelife/lixeira`, que só é esvaziada depois de 30 dias. No Drive, eles vão para a lixeira do Drive.
+- **Uma cópia só é removida depois de conferida.** O FileLife compara o conteúdo (SHA-256) antes de tratar um arquivo como cópia: se você editou o original, o novo download é mantido. O zip do Arquivo Frio é testado antes de remover o original. O envio ao Drive é conferido por MD5 e tamanho antes de liberar o espaço no PC.
+- **Pastas protegidas.** Não é possível monitorar a pasta pessoal inteira, a raiz do disco, pastas do sistema nem as pastas do próprio FileLife.
+- **Downloads em andamento são respeitados.** Arquivos temporários (`.crdownload`, `.part`…), ocultos, de sistema (`desktop.ini`), arquivos abertos no Office (`~$…`) e links simbólicos são ignorados. Um arquivo só é movido depois de ficar 5 segundos sem mudar.
+- **Configurações inválidas viram padrão seguro.** Um `config.json` quebrado ou com valores estranhos nunca faz o FileLife apagar nada.
+- **Só uma cópia do programa roda por vez.**
+
+**Privacidade:**
+- Tudo roda no seu computador. O painel só responde ao próprio PC (`127.0.0.1`), exige um código secreto, recusa acessos vindos de outros sites e não pode ser embutido em outras páginas.
+- O login do Google, o banco de dados e as configurações ficam em `~/.filelife`, legíveis só pelo seu usuário.
+- No Google Drive, o FileLife só enxerga os arquivos que ele mesmo enviou (permissão `drive.file`). O botão "Sair" revoga o acesso.
+- O **resumo com IA vem desligado**. Se você ligar, o conteúdo dos documentos é enviado à Anthropic.
+- "Abrir" num programa baixado (`.exe`, `.msi`, scripts…) mostra a pasta em vez de executar o programa.
+
+**Se for distribuir o FileLife:**
+- **Nunca** coloque a sua `ANTHROPIC_API_KEY` dentro do programa: quem tiver o `.exe` conseguiria extraí-la e usar por sua conta. Cada pessoa usa a própria chave.
+- O `google_credentials.json` ("App para computador") pode ir junto com o programa. Para apps desse tipo, o Google não trata o arquivo como segredo.
+- Antes de passar de 100 usuários, publique o app na tela de permissão OAuth do Google.
+- Assine o `.exe` (certificado de assinatura de código) para o Windows SmartScreen não bloquear o programa.

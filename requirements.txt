@@ -3,3 +3,4 @@ google-api-python-client  # opcional: envio direto ao Google Drive (função 4)
 google-auth-oauthlib      # opcional: login do Google Drive
 pyzipper                  # opcional: zip com senha no Arquivo Frio
 pywebview                 # opcional: abre a interface numa janela própria
+send2trash                # recomendado: itens removidos vão para a Lixeira do sistema

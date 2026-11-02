@@ -21,12 +21,32 @@ import filelifecycle as fl
 
 HOST = "127.0.0.1"
 PORT = 8787
-TOKEN = secrets.token_urlsafe(24)  # impede que outros sites chamem a API local
+TOKEN = secrets.token_urlsafe(32)  # impede que outros sites chamem a API local
+MAX_BODY = 1024 * 1024
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",                 # impede embutir o painel em outro site
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src data: https://*.googleusercontent.com; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+}
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 STATE = {"watcher": None, "login": "idle", "login_error": "", "account": None,
          "account_checked": 0}
 STATE_LOCK = threading.Lock()
+
+def log(msg):
+    """print que não quebra no .exe sem janela de terminal."""
+    try:
+        print(msg, flush=True)
+    except (OSError, ValueError, AttributeError):
+        pass
+
 
 EDITABLE_CONFIG = {
     "watch_dir": str, "on_expire": str, "dedupe": str, "default_expiry": dict,
@@ -147,6 +167,13 @@ def file_row(file_id):
         return conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
 
 
+def require_row(file_id):
+    r = file_row(file_id)
+    if r is None or r["status"] != "active":
+        raise ValueError("Arquivo não encontrado.")
+    return r
+
+
 def do_action(data):
     action, fid = data.get("action"), data.get("id")
     fid = int(fid) if fid is not None else None
@@ -154,30 +181,39 @@ def do_action(data):
         exp = fl.set_expiry(fid, fl.parse_duration(data["value"]))
         return f"Novo prazo: {fl.fmt_ts(exp)}"
     if action == "expire":
+        require_row(fid)
         fl.set_expiry(fid, 0)
         fl.run_cleanup()
         return "Arquivo expirado"
     if action == "open":
-        r = file_row(fid)
-        target = r["drive_link"] or Path(r["file_path"]).as_uri()
-        webbrowser.open(target)
+        r = require_row(fid)
+        if r["drive_link"]:
+            webbrowser.open(r["drive_link"])
+            return "Abrindo no Google Drive..."
+        p = Path(r["file_path"])
+        if not p.exists():
+            raise ValueError("O arquivo não está mais nesse lugar.")
+        if p.suffix.lower() in fl.RISKY_EXTS:
+            # Abrir um programa baixado o executaria: mostra a pasta e deixa o usuário decidir
+            webbrowser.open(p.parent.as_uri())
+            return "Por segurança, programas não são executados daqui: abrindo a pasta."
+        webbrowser.open(p.as_uri())
         return "Abrindo..."
-    if action == "folder":
-        r = file_row(fid)
-        p = Path(r["shortcut_path"] or r["file_path"])
-        webbrowser.open(p.parent.as_uri())
-        return "Abrindo pasta..."
     if action == "summary":
-        r = file_row(fid)
+        r = require_row(fid)
         if r["summary_path"] and Path(r["summary_path"]).exists():
             return Path(r["summary_path"]).read_text(encoding="utf-8")
-        threading.Thread(target=fl.summarize_file, args=(fid,), daemon=True).start()
+        if not fl.CONFIG["ai_summary"]:
+            raise ValueError("Ative o resumo com IA em Configurações primeiro.")
+        fl.SUMMARY_QUEUE.put(fid)
         return "Gerando resumo... ele aparece na atividade em instantes."
     if action == "cloud":
-        r = file_row(fid)
+        r = require_row(fid)
         if r["cloud"]:
             return "Esse arquivo já está na nuvem."
         if fl.CONFIG.get("cloud_mode", "api") == "api":
+            if not fl.DRIVE_TOKEN.exists():
+                raise ValueError("Entre com sua conta Google primeiro.")
             fl.UPLOAD_QUEUE.put((fid, r["file_path"]))
             return "Enviando para o Google Drive..."
         fl.send_to_cloud(fid, r["file_path"])
@@ -196,28 +232,39 @@ def do_action(data):
     if action == "open_drive":
         webbrowser.open("https://drive.google.com/drive/my-drive")
         return "Abrindo Google Drive..."
+    if action == "quit":
+        threading.Timer(0.5, SHUTDOWN.set).start()
+        return "FileLife encerrado. Pode fechar esta aba."
     raise ValueError("Ação desconhecida")
 
 
 def update_config(data):
+    if not isinstance(data, dict):
+        raise ValueError("Dados inválidos")
     changes = {}
     for key, typ in EDITABLE_CONFIG.items():
         if key not in data:
             continue
         value = data[key]
         if typ is int:
+            if isinstance(value, bool):
+                raise ValueError(f"Valor inválido para {key}")
             value = int(value)
         elif not isinstance(value, typ):
             raise ValueError(f"Valor inválido para {key}")
         changes[key] = value
-    for dur in changes.get("default_expiry", {}).values():
-        fl.parse_duration(dur)  # valida
+    if changes.get("watch_dir"):
+        folder = Path(changes["watch_dir"]).expanduser()
+        reason = fl.unsafe_watch_reason(folder)
+        if reason:
+            raise ValueError(f"Pasta recusada: {reason}.")
+        if not folder.is_dir():
+            raise ValueError("Essa pasta não existe.")
     old_watch = fl.watch_folder()
-    fl.save_config(changes)
+    fl.save_config(changes)  # valida tudo e recusa valores inválidos
     new_watch = fl.watch_folder()
     if new_watch != old_watch:
-        new_watch.mkdir(parents=True, exist_ok=True)
-        STATE["watcher"].stop_event.set()
+        STATE["watcher"].stop()
         STATE["watcher"] = fl.Watcher(new_watch)
         STATE["watcher"].start()
         fl.say(f"👀 Agora monitorando {new_watch}")
@@ -235,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -244,13 +293,19 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False))
 
+    def _host_ok(self):
+        # Bloqueia "DNS rebinding": só aceita quem acessa pelo endereço local
+        return self.headers.get("Host", "") in (f"127.0.0.1:{self.server.server_address[1]}",
+                                                f"localhost:{self.server.server_address[1]}")
+
     def _authorized(self):
-        host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost") and \
+        return self._host_ok() and \
             secrets.compare_digest(self.headers.get("X-Token", ""), TOKEN)
 
     def do_GET(self):
         url = urlparse(self.path)
+        if not self._host_ok():
+            return self._json(403, {"error": "proibido"})
         if url.path == "/":
             html = (BASE_DIR / "ui.html").read_text(encoding="utf-8")
             return self._send(200, html.replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
@@ -261,15 +316,22 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/versions":
             if not self._authorized():
                 return self._json(403, {"error": "proibido"})
-            fid = int(parse_qs(url.query)["id"][0])
+            try:
+                fid = int(parse_qs(url.query)["id"][0])
+            except (KeyError, ValueError, IndexError):
+                return self._json(400, {"error": "id inválido"})
             return self._json(200, [v.name for v in fl.list_versions(fid)])
         self._json(404, {"error": "não encontrado"})
 
     def do_POST(self):
         if not self._authorized():
             return self._json(403, {"error": "proibido"})
-        length = int(self.headers.get("Content-Length") or 0)
         try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 <= length <= MAX_BODY:
+                return self._json(413, {"ok": False, "message": "pedido grande demais"})
+            if "application/json" not in self.headers.get("Content-Type", ""):
+                return self._json(415, {"ok": False, "message": "tipo inválido"})
             data = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/login":
                 start_login()
@@ -287,45 +349,61 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return self._json(404, {"error": "não encontrado"})
             self._json(200, {"ok": True, "message": msg})
-        except ValueError as e:
-            self._json(400, {"ok": False, "message": str(e)})
+        except (ValueError, KeyError, TypeError) as e:
+            self._json(400, {"ok": False, "message": str(e) or "Pedido inválido"})
         except Exception as e:
             fl.log_action(f"Erro na interface ({self.path}): {e!r}")
-            self._json(500, {"ok": False, "message": f"Erro: {e}"})
+            self._json(500, {"ok": False, "message": "Algo deu errado — veja o log em ~/.filelife/logs"})
+
+
+SHUTDOWN = threading.Event()
 
 
 def main():
+    url_file = fl.APP_DIR / "ui_url.txt"
+    if not fl.acquire_single_instance():
+        # Já está aberto: só mostra a janela que existe
+        try:
+            webbrowser.open(url_file.read_text(encoding="utf-8").strip())
+        except OSError:
+            log("O FileLife já está aberto.")
+        return
     STATE["watcher"] = fl.start_background()
-    port = PORT
+    server = None
     for attempt in range(20):
         try:
-            server = ThreadingHTTPServer((HOST, port + attempt), Handler)
+            server = ThreadingHTTPServer((HOST, PORT + attempt), Handler)
             break
         except OSError:
             continue
-    else:
+    if server is None:
         raise SystemExit("Nenhuma porta livre para a interface.")
     url = f"http://{HOST}:{server.server_address[1]}/"
+    fl.write_private(url_file, url)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     fl.say(f"👀 Monitorando {STATE['watcher'].folder}")
-    print(f"FileLife aberto em {url}  (feche esta janela para sair)")
+    log(f"FileLife aberto em {url}  (feche esta janela para sair)")
 
     try:
         import webview  # opcional: `pip install pywebview` abre numa janela própria
     except ImportError:
         webview = None
-    if webview and "--browser" not in sys.argv:
-        webview.create_window("FileLife", url, width=1200, height=800, min_size=(380, 600))
-        webview.start()
-    else:
-        if "--no-open" not in sys.argv:
-            webbrowser.open(url)
-        try:
-            threading.Event().wait()
-        except KeyboardInterrupt:
-            pass
-    STATE["watcher"].stop_event.set()
-    server.shutdown()
+    try:
+        if webview and "--browser" not in sys.argv:
+            webview.create_window("FileLife", url, width=1200, height=800, min_size=(380, 600))
+            threading.Thread(target=lambda: (SHUTDOWN.wait(), [w.destroy() for w in webview.windows]),
+                             daemon=True).start()
+            webview.start()
+        else:
+            if "--no-open" not in sys.argv:
+                webbrowser.open(url)
+            while not SHUTDOWN.wait(1):
+                pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        STATE["watcher"].stop()
+        server.shutdown()
 
 
 if __name__ == "__main__":
