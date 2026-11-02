@@ -1,6 +1,6 @@
-# FileLifecycle Pro
+# FileLife
 
-Sistema de Gestão de Ciclo de Vida de Arquivos: monitora a pasta **Downloads**, categoriza, renomeia com timestamp, move para `~/OrganizedFiles/<Categoria>` e registra uma **data de expiração** em SQLite. Arquivos expirados são removidos automaticamente.
+Seus arquivos organizados no Google Drive, com prazo de validade, sem duplicatas e com resumo por IA. Funciona no navegador, em qualquer sistema, sem servidor. Há também uma versão opcional para PC, que vigia a pasta Downloads em segundo plano.
 
 ## FileLife Web (versão principal)
 
