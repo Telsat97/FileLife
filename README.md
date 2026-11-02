@@ -109,8 +109,8 @@ O FileLife só consegue ver e mexer nos arquivos que ele mesmo enviou (permissã
 2. Em **APIs e serviços → Biblioteca**, ative a **Google Drive API**.
 3. Em **APIs e serviços → Tela de permissão OAuth**, escolha "Externo", preencha o nome do app e o seu e-mail e, em **Usuários de teste**, adicione o seu Gmail.
 4. Em **APIs e serviços → Credenciais → Criar credenciais → ID do cliente OAuth**, escolha o tipo **"App para computador"**.
-5. Baixe o JSON e salve em `~/.filelife/google_credentials.json` (no Windows: `C:\Users\SEU_USUARIO\.filelife\google_credentials.json`).
-6. Rode `pip install -r requirements.txt`, abra o FileLife e digite `drive login`. O navegador abre, você entra na sua conta Google e autoriza. Pronto: o login fica salvo.
+5. Baixe o JSON.
+6. No FileLife, clique em **📄 Importar credenciais do Google**, escolha o JSON e depois clique em **Entrar com Google**. O navegador abre, você autoriza, e pronto: o login fica salvo.
 
 > Para vender o produto: os passos 1 a 5 são feitos **só por você**, e o seu `google_credentials.json` vai junto com o programa. Seus clientes só fazem o passo 6 (login no navegador). Com mais de 100 usuários, publique o app na tela de permissão OAuth.
 
