@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+file_lifecycle.db
+LifecycleLog/
+dist/
+build/
+*.spec
