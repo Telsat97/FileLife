@@ -116,6 +116,13 @@ def files_list():
     return out
 
 
+def safe_autostart_enabled():
+    try:
+        return fl.autostart_enabled()
+    except Exception:
+        return False
+
+
 def full_state():
     acc = account_info()
     with STATE_LOCK:
@@ -124,6 +131,8 @@ def full_state():
     return {
         "account": acc, "login": login,
         "has_credentials": fl.DRIVE_CREDENTIALS.exists(),
+        "has_ai_key": bool(fl.get_anthropic_key()),
+        "autostart": safe_autostart_enabled(),
         "stats": stats(), "files": files_list(),
         "activity": list(fl.ACTIVITY)[-40:][::-1],
         "watching": str(watcher.folder) if watcher else "",
@@ -346,6 +355,16 @@ class Handler(BaseHTTPRequestHandler):
                 msg = "Versão restaurada."
             elif self.path == "/api/config":
                 msg = update_config(data)
+            elif self.path == "/api/credentials":
+                fl.save_google_credentials(data.get("content", ""))
+                msg = "Credenciais do Google salvas! Agora clique em “Entrar com Google”."
+            elif self.path == "/api/ai_key":
+                fl.save_anthropic_key(data.get("key", ""))
+                msg = "Chave salva." if data.get("key") else "Chave removida."
+            elif self.path == "/api/autostart":
+                fl.set_autostart(bool(data.get("enabled")))
+                msg = "FileLife vai abrir junto com o computador." if data.get("enabled") \
+                    else "Início automático desligado."
             else:
                 return self._json(404, {"error": "não encontrado"})
             self._json(200, {"ok": True, "message": msg})
@@ -389,7 +408,7 @@ def main():
     except ImportError:
         webview = None
     try:
-        if webview and "--browser" not in sys.argv:
+        if webview and "--browser" not in sys.argv and "--no-open" not in sys.argv:
             webview.create_window("FileLife", url, width=1200, height=800, min_size=(380, 600))
             threading.Thread(target=lambda: (SHUTDOWN.wait(), [w.destroy() for w in webview.windows]),
                              daemon=True).start()

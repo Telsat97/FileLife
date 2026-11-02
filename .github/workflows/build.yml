@@ -1,0 +1,73 @@
+name: Gerar executáveis
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            sep: ";"
+            artifact: FileLife-Windows
+          - os: macos-latest
+            sep: ":"
+            artifact: FileLife-Mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller anthropic google-api-python-client google-auth-oauthlib pyzipper send2trash
+
+      - name: Testar se o código carrega
+        run: python -c "import filelifecycle, filelife_app"
+
+      - name: Gerar executável
+        run: >
+          pyinstaller --onefile --windowed --name FileLife
+          --add-data "ui.html${{ matrix.sep }}."
+          --collect-data googleapiclient
+          --hidden-import send2trash --hidden-import pyzipper
+          filelife_app.py
+
+      - name: Empacotar (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/FileLife.exe -DestinationPath ${{ matrix.artifact }}.zip
+
+      - name: Empacotar (Mac)
+        if: runner.os == 'macOS'
+        run: cd dist && ditto -c -k --keepParent FileLife.app ../${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          body: |
+            **Windows:** baixe `FileLife-Windows.zip`, extraia e abra o `FileLife.exe`.
+            **Mac:** baixe `FileLife-Mac.zip`, extraia e abra o `FileLife.app` (na 1ª vez: botão direito → Abrir).

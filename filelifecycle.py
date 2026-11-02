@@ -44,6 +44,7 @@ COLD_DIR = ORGANIZED_DIR / "_ArquivoFrio"
 REPORTS_DIR = ORGANIZED_DIR / "_Relatorios"
 TRASH_DIR = APP_DIR / "lixeira"          # nada é apagado de vez: vai pra cá por 30 dias
 STATE_PATH = APP_DIR / "state.json"
+ANTHROPIC_KEY_PATH = APP_DIR / "anthropic_key.txt"
 TRASH_DAYS = 30
 LOG_DAYS = 90
 
@@ -293,6 +294,82 @@ def save_state(**changes):
     state = load_state()
     state.update(changes)
     write_private(STATE_PATH, json.dumps(state))
+
+
+# --- Iniciar junto com o computador ------------------------------------------
+AUTOSTART_NAME = "FileLife"
+
+
+def _autostart_command():
+    if getattr(sys, "frozen", False):  # .exe / .app gerado pelo PyInstaller
+        return [sys.executable, "--no-open"]
+    python = Path(sys.executable)
+    if os.name == "nt" and (python.parent / "pythonw.exe").exists():
+        python = python.parent / "pythonw.exe"  # sem janela preta de terminal
+    return [str(python), str(Path(__file__).resolve().with_name("filelife_app.py")), "--no-open"]
+
+
+def _mac_plist():
+    return Path.home() / "Library" / "LaunchAgents" / "com.filelife.app.plist"
+
+
+def _linux_desktop():
+    return Path.home() / ".config" / "autostart" / "filelife.desktop"
+
+
+def autostart_enabled():
+    if os.name == "nt":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                winreg.QueryValueEx(k, AUTOSTART_NAME)
+                return True
+        except OSError:
+            return False
+    if sys.platform == "darwin":
+        return _mac_plist().exists()
+    return _linux_desktop().exists()
+
+
+def set_autostart(enabled):
+    cmd = _autostart_command()
+    if os.name == "nt":
+        import subprocess
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                            winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, subprocess.list2cmdline(cmd))
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    winreg.DeleteValue(k, AUTOSTART_NAME)
+        return
+    if sys.platform == "darwin":
+        from xml.sax.saxutils import escape as x
+        plist = _mac_plist()
+        if enabled:
+            args = "".join(f"<string>{x(a)}</string>" for a in cmd)
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD '
+                'PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                '<plist version="1.0"><dict><key>Label</key><string>com.filelife.app</string>'
+                f'<key>ProgramArguments</key><array>{args}</array>'
+                '<key>RunAtLoad</key><true/></dict></plist>\n', encoding="utf-8")
+        else:
+            plist.unlink(missing_ok=True)
+        return
+    desktop = _linux_desktop()
+    if enabled:
+        import shlex
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text("[Desktop Entry]\nType=Application\nName=FileLife\n"
+                           f"Exec={' '.join(shlex.quote(a) for a in cmd)}\n"
+                           "X-GNOME-Autostart-enabled=true\n", encoding="utf-8")
+    else:
+        desktop.unlink(missing_ok=True)
 
 
 # --- Uma instância por vez ---------------------------------------------------
@@ -879,7 +956,8 @@ def summarize_file(file_id):
         return None
 
     try:
-        client = anthropic.Anthropic()
+        key = get_anthropic_key()
+        client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
         response = client.beta.messages.create(
             model=CONFIG["ai_model"],
             max_tokens=16000,
@@ -920,6 +998,27 @@ def summarize_file(file_id):
     log_action(f"Resumo gerado #{file_id}: {out}")
     say(f"🧠 #{file_id} resumido:\n{text}")
     return out
+
+
+def get_anthropic_key():
+    """Chave salva pela interface; se não houver, usa a variável ANTHROPIC_API_KEY."""
+    try:
+        key = ANTHROPIC_KEY_PATH.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+    except OSError:
+        pass
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+
+
+def save_anthropic_key(key):
+    key = (key or "").strip()
+    if not key:
+        ANTHROPIC_KEY_PATH.unlink(missing_ok=True)
+        return
+    if not re.fullmatch(r"sk-ant-[A-Za-z0-9_\-]{20,300}", key):
+        raise ValueError("Isso não parece uma chave da Anthropic (começa com sk-ant-).")
+    write_private(ANTHROPIC_KEY_PATH, key)
 
 
 def enqueue_summary(file_id):
@@ -1050,6 +1149,30 @@ def _drive_libs():
         raise ValueError("instale as bibliotecas do Google: "
                          "pip install google-api-python-client google-auth-oauthlib")
     return Request, Credentials, InstalledAppFlow, build, MediaFileUpload
+
+
+def save_google_credentials(data):
+    """Valida e salva o JSON baixado do Google Cloud (ID do cliente OAuth "App para computador")."""
+    if isinstance(data, (str, bytes)):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            raise ValueError("O arquivo não é um JSON válido.")
+    if not isinstance(data, dict):
+        raise ValueError("Arquivo de credenciais inválido.")
+    if "web" in data:
+        raise ValueError("Esse ID do cliente é do tipo 'Aplicativo da Web'. Crie um do tipo "
+                         "'App para computador' (veja o README).")
+    inst = data.get("installed")
+    if not isinstance(inst, dict) or not all(isinstance(inst.get(k), str) and inst.get(k)
+                                             for k in ("client_id", "client_secret")):
+        raise ValueError("Esse não é o arquivo de credenciais do Google (falta 'installed').")
+    if not inst["client_id"].endswith(".apps.googleusercontent.com"):
+        raise ValueError("client_id inválido.")
+    for key in ("auth_uri", "token_uri"):
+        if key in inst and not str(inst[key]).startswith("https://"):
+            raise ValueError("Credenciais com endereço suspeito.")
+    write_private(DRIVE_CREDENTIALS, json.dumps({"installed": inst}))
 
 
 def drive_login():

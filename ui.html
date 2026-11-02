@@ -170,12 +170,16 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;fl
       <h2>Conecte seu Google Drive</h2>
       <p>Entre com sua conta Google e os arquivos grandes vão direto para o seu Drive, liberando espaço no PC.
         Você abre tudo pelo navegador, sem instalar nada.</p>
-      <p class="note" id="credNote" hidden>⚠️ Falta o arquivo de credenciais do Google em
-        <code>~/.filelife/google_credentials.json</code> — veja o README, seção “Configurar o Google Drive”.</p>
+      <p class="note" id="credNote" hidden>Passo 1: importe o arquivo de credenciais que você baixou do
+        Google Cloud (veja o README, seção “Configurar o Google Drive”). Passo 2: clique em “Entrar com Google”.</p>
       <p class="note" id="loginErr" hidden></p>
     </div>
-    <button class="google-btn" id="loginBig" onclick="login()"></button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" id="importBtn" onclick="pickCredentials()">📄 Importar credenciais do Google</button>
+      <button class="google-btn" id="loginBig" onclick="login()"></button>
+    </div>
   </section>
+  <input type="file" id="credFile" accept=".json,application/json" hidden>
 
   <section class="stats" id="stats"></section>
 
@@ -257,6 +261,7 @@ function renderAccount(){
   document.getElementById("loginBig").innerHTML = loginLabel;
   document.getElementById("loginBig").disabled = running || !S.has_credentials;
   document.getElementById("credNote").hidden = S.has_credentials;
+  document.getElementById("importBtn").hidden = S.has_credentials;
   const err = document.getElementById("loginErr");
   err.hidden = S.login.status !== "error"; err.textContent = "⚠️ " + S.login.error;
 }
@@ -404,12 +409,42 @@ function openSettings(){
     <div class="section-title">Inteligência artificial</div>
     <div class="form-row"><label>Resumir documentos</label><select id="cAI">
       <option value="1" ${yes(c.ai_summary)}>Sim</option><option value="0" ${yes(!c.ai_summary)}>Não</option></select></div>
+    <div class="form-row"><label>Chave da Anthropic ${S.has_ai_key ? "✅" : ""}</label>
+      <div style="display:flex;gap:6px"><input type="password" id="cKey" autocomplete="off"
+        placeholder="${S.has_ai_key ? "configurada — cole outra para trocar" : "sk-ant-..."}">
+        <button class="btn small" onclick="saveKey()">Salvar</button>
+        ${S.has_ai_key ? '<button class="btn small danger" onclick="saveKey(true)">Remover</button>' : ""}</div></div>
     <p style="color:var(--muted);font-size:12.5px;margin:0 0 8px">🔒 Ao ativar, o conteúdo dos documentos
       é enviado à Anthropic (Claude) para gerar o resumo. Não ative se seus documentos forem confidenciais.
       É preciso uma chave própria da API (ANTHROPIC_API_KEY), e o uso é cobrado nela.</p>
     <div class="section-title">Programa</div>
+    <div class="form-row"><label>Iniciar junto com o computador</label><select id="cAuto" onchange="setAutostart(this.value==='1')">
+      <option value="1" ${yes(S.autostart)}>Sim</option><option value="0" ${yes(!S.autostart)}>Não</option></select></div>
+    <div class="form-row"><label>Credenciais do Google ${S.has_credentials ? "✅" : ""}</label>
+      <div><button class="btn small" onclick="pickCredentials()">📄 ${S.has_credentials ? "Trocar" : "Importar"} arquivo</button></div></div>
     <button class="btn danger" onclick="quitApp()">⏻ Encerrar FileLife</button>`,
     '<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="saveSettings()">Salvar</button>');
+}
+function pickCredentials(){
+  const input = document.getElementById("credFile");
+  input.value = "";
+  input.onchange = async () => {
+    const file = input.files[0]; if(!file) return;
+    if(file.size > 64 * 1024){ toast("⚠️ Arquivo grande demais para ser de credenciais."); return; }
+    try{ const r = await api("/api/credentials", {content: await file.text()}); toast(r.message); closeModal(); refresh(); }
+    catch(e){ toast("⚠️ " + e.message); }
+  };
+  input.click();
+}
+async function saveKey(remove){
+  const key = remove ? "" : document.getElementById("cKey").value.trim();
+  if(!remove && !key){ toast("Cole a chave primeiro."); return; }
+  try{ const r = await api("/api/ai_key", {key}); toast(r.message); closeModal(); refresh(); }
+  catch(e){ toast("⚠️ " + e.message); }
+}
+async function setAutostart(enabled){
+  try{ const r = await api("/api/autostart", {enabled}); toast(r.message); refresh(); }
+  catch(e){ toast("⚠️ " + e.message); }
 }
 async function quitApp(){
   if(!confirm("Encerrar o FileLife? Seus downloads deixam de ser organizados até você abrir de novo.")) return;
