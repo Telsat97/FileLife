@@ -282,8 +282,10 @@ async function scanLocal(manual) {
   if (manual) {
     const total = files.reduce((a, f) => a + f.size, 0);
     const remove = S.settings.remove_local_after_upload;
+    const many = files.length > 100 || total > 5 * 1024 ** 3;
     const ok = await confirmModal("Enviar arquivos da pasta para o Drive?",
-      [h("p", {}, `${files.length} arquivo(s), ${R.humanSize(total)}, da pasta “${S.localDir.name}”.`),
+      [many ? h("p", { class: "warn" }, `⚠️ São muitos arquivos. Confirme que “${S.localDir.name}” é mesmo a pasta certa (ex.: Downloads).`) : null,
+       h("p", {}, `${files.length} arquivo(s), ${R.humanSize(total)}, da pasta “${S.localDir.name}”.`),
        h("ul", { class: "mini-list" }, files.slice(0, 12).map(f => h("li", {}, `${f.name} (${R.humanSize(f.size)})`)),
          files.length > 12 ? h("li", {}, `…e mais ${files.length - 12}`) : null),
        h("p", { class: "muted" }, remove
@@ -298,6 +300,13 @@ async function scanLocal(manual) {
         const r = await addFile(f, f.name, p => renderBusy(`Enviando ${f.name} (${Math.round(p * 100)}%)`));
         if (r.duplicate) log(`♻️ ${f.name} já estava no Drive.`);
         if (S.settings.remove_local_after_upload && r.verified) {
+          // O arquivo pode ter sido editado durante o envio: só remove se continua igual
+          let now;
+          try { now = await (await S.localDir.getFileHandle(f.name)).getFile(); } catch { now = null; }
+          if (!now || now.size !== f.size || now.lastModified !== f.lastModified) {
+            log(`✋ ${f.name} mudou durante o envio — a cópia do computador foi mantida.`);
+            continue;
+          }
           await S.localDir.removeEntry(f.name);
           S.settings.stats.local_freed_bytes += f.size; saveSettings();
           log(`💾 ${f.name} removido do computador (cópia conferida no Drive).`);
@@ -447,7 +456,10 @@ function openSettings(focus) {
   const hasKey = !!getAiKey();
   const keyInput = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
                                 placeholder: hasKey ? "Chave salva neste navegador. Cole outra para trocar" : "sk-ant-..." });
-  const remember = h("input", { type: "checkbox", checked: !!localStorage.getItem(AI_KEY_STORE) || !hasKey });
+  let remembered = false;
+  try { remembered = !!localStorage.getItem(AI_KEY_STORE); } catch {}
+  // Padrão seguro: a chave some quando a aba fecha (bom para computadores compartilhados)
+  const remember = h("input", { type: "checkbox", checked: remembered });
 
   modal("Configurações", [
     h("div", { class: "section-title" }, "Prazo padrão por categoria"), rows,

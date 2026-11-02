@@ -1,31 +1,43 @@
 name: Publicar site
 
-# Só publica quando você mandar (aba Actions → "Publicar site" → Run workflow).
+# Republica o site (pasta web/) no ramo gh-pages sempre que ele muda no main.
 on:
+  push:
+    branches: [main]
+    paths: ["web/**"]
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Conferir que o ID do cliente do Google foi configurado
-        run: grep -Eq 'googleClientId: "[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com"' web/config.js || (echo "::error::Preencha googleClientId em web/config.js" && exit 1)
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          path: web
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Conferir o site antes de publicar
+        run: |
+          grep -Eq 'googleClientId: "[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com"' web/config.js \
+            || { echo "::error::Preencha googleClientId em web/config.js"; exit 1; }
+          # Nada de segredo pode ir para o site público
+          if grep -rEn 'sk-ant-[A-Za-z0-9_-]{20,}|GOCSPX-|client_secret|BEGIN [A-Z ]*PRIVATE KEY' web/; then
+            echo "::error::Encontrei algo que parece um segredo dentro de web/"; exit 1
+          fi
+
+      - name: Publicar no ramo gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          touch web/.nojekyll
+          git add -f web/.nojekyll
+          git commit -m "nojekyll" --allow-empty -q
+          git subtree split --prefix web -b gh-pages-tmp
+          git push -f origin gh-pages-tmp:gh-pages
