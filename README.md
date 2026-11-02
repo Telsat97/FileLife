@@ -2,6 +2,15 @@
 
 Sistema de Gestão de Ciclo de Vida de Arquivos: monitora a pasta **Downloads**, categoriza, renomeia com timestamp, move para `~/OrganizedFiles/<Categoria>` e registra uma **data de expiração** em SQLite. Arquivos expirados são removidos automaticamente.
 
+## Comece aqui
+
+1. **Baixe o programa** em [Releases](https://github.com/Telsat97/FileLife/releases): `FileLife-Windows.zip` ou `FileLife-Mac.zip`. Extraia e abra. Não precisa instalar Python.
+2. **(Opcional) Google Drive:** crie as credenciais no Google Cloud (passo a passo abaixo, em "Configurar o Google Drive", ~5 min). No FileLife, clique em **📄 Importar credenciais do Google** e depois em **Entrar com Google**.
+3. **(Opcional) Resumo com IA:** em ⚙️ Configurações, cole sua chave da Anthropic e ligue "Resumir documentos".
+4. **(Opcional)** Em ⚙️ Configurações, ligue **Iniciar junto com o computador**.
+
+> Para gerar uma nova versão dos executáveis, crie uma tag `vX.Y.Z` no GitHub. A automação em `.github/workflows/build.yml` gera os arquivos de Windows e Mac e publica em Releases.
+
 ## Interface gráfica
 
 ![Interface do FileLife](docs/interface.png)
