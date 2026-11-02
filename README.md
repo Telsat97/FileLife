@@ -2,7 +2,32 @@
 
 Sistema de Gestão de Ciclo de Vida de Arquivos: monitora a pasta **Downloads**, categoriza, renomeia com timestamp, move para `~/OrganizedFiles/<Categoria>` e registra uma **data de expiração** em SQLite. Arquivos expirados são removidos automaticamente.
 
-## Uso
+## Interface gráfica
+
+![Interface do FileLife](docs/interface.png)
+
+```bash
+python filelife_app.py
+```
+
+O painel abre no navegador, só no seu computador (`127.0.0.1`). Nele você:
+- **Entra com a conta Google**: um clique abre o login do Google, e daí em diante os arquivos grandes vão para o seu Drive.
+- Vê seus arquivos com categoria, tag, prazo (verde, amarelo ou vermelho) e se estão no PC ou no Drive.
+- Muda o prazo, mantém um arquivo para sempre, expira na hora, resume com IA, envia ao Drive e restaura versões.
+- Acompanha a atividade em tempo real e as estatísticas (espaço liberado, horas economizadas, duplicatas).
+- Muda as configurações (pasta monitorada, prazos por categoria, Drive, IA) sem mexer em JSON.
+
+Com `pip install pywebview`, ele abre numa janela própria, como um programa normal. Use `--browser` para forçar o navegador.
+
+**Gerar o `.exe` da interface:**
+
+```bash
+pyinstaller --onefile --noconsole --add-data "ui.html;." --name FileLife filelife_app.py
+```
+
+(No Mac/Linux, troque `;` por `:` em `--add-data`.)
+
+## Uso pelo terminal
 
 ```bash
 python filelifecycle.py                      # monitora ~/Downloads em segundo plano

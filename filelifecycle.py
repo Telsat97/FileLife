@@ -11,6 +11,7 @@ Uso:
 """
 
 import argparse
+import collections
 import datetime
 import hashlib
 import json
@@ -69,6 +70,8 @@ DEFAULT_CONFIG = {
     "max_versions": 10,
     # Intervalos (segundos)
     "scan_interval": 3,
+    # Pasta monitorada (vazio = Downloads)
+    "watch_dir": "",
     "cleanup_interval": 3600,
     # Minutos economizados por arquivo organizado (usado no relatório)
     "minutes_saved_per_file": 1.5,
@@ -107,9 +110,17 @@ DB_LOCK = threading.RLock()
 PRINT_LOCK = threading.Lock()
 
 
+# Últimas mensagens, mostradas no feed de atividade da interface gráfica
+ACTIVITY = collections.deque(maxlen=200)
+
+
 def say(msg):
     with PRINT_LOCK:
-        print(msg, flush=True)
+        ACTIVITY.append({"ts": int(time.time()), "msg": msg})
+        try:
+            print(msg, flush=True)
+        except (OSError, ValueError, AttributeError):  # sem console (.exe sem terminal)
+            pass
 
 
 def load_config():
@@ -128,6 +139,30 @@ def load_config():
 
 
 CONFIG = DEFAULT_CONFIG
+
+
+def save_config(changes):
+    """Atualiza e grava a configuração (usado pela interface)."""
+    CONFIG.update(changes)
+    CONFIG_PATH.write_text(json.dumps(CONFIG, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def watch_folder():
+    return Path(CONFIG.get("watch_dir") or Path.home() / "Downloads").expanduser()
+
+
+def start_background(organize_existing=False, folder=None):
+    """Carrega config e banco, inicia o monitor e os workers. Retorna o Watcher."""
+    global CONFIG
+    CONFIG = load_config()
+    init_db()
+    folder = Path(folder).expanduser() if folder else watch_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=summary_worker, daemon=True).start()
+    threading.Thread(target=upload_worker, daemon=True).start()
+    watcher = Watcher(folder, organize_existing=organize_existing)
+    watcher.start()
+    return watcher
 
 
 def log_action(message):
@@ -766,6 +801,33 @@ def drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def drive_account():
+    """Conta Google conectada: {'name', 'email', 'photo'} ou None."""
+    if not DRIVE_TOKEN.exists():
+        return None
+    service = drive_service()
+    user = service.about().get(fields="user(displayName,emailAddress,photoLink)").execute()["user"]
+    return {"name": user.get("displayName", ""), "email": user.get("emailAddress", ""),
+            "photo": user.get("photoLink", "")}
+
+
+def drive_logout():
+    """Desconecta a conta Google (revoga o acesso e apaga o login salvo)."""
+    if not DRIVE_TOKEN.exists():
+        return
+    try:
+        token = json.loads(DRIVE_TOKEN.read_text(encoding="utf-8")).get("token")
+        if token:
+            import urllib.parse
+            import urllib.request
+            data = urllib.parse.urlencode({"token": token}).encode()
+            urllib.request.urlopen("https://oauth2.googleapis.com/revoke", data=data, timeout=10)
+    except Exception as e:
+        log_action(f"Falha ao revogar token do Google: {e!r}")
+    DRIVE_TOKEN.unlink(missing_ok=True)
+    _folder_cache.clear()
+
+
 _folder_cache = {}
 
 
@@ -1183,23 +1245,15 @@ def handle_command(line):
 
 
 def main(argv=None):
-    global CONFIG
     parser = argparse.ArgumentParser(description="FileLifecycle Pro")
-    parser.add_argument("--watch", default=str(Path.home() / "Downloads"),
-                        help="pasta monitorada (padrão: ~/Downloads)")
+    parser.add_argument("--watch", default=None,
+                        help="pasta monitorada (padrão: watch_dir do config ou ~/Downloads)")
     parser.add_argument("--organize-existing", action="store_true",
                         help="organiza também os arquivos que já estão na pasta")
     args = parser.parse_args(argv)
 
-    CONFIG = load_config()
-    init_db()
-    folder = Path(args.watch).expanduser()
-    folder.mkdir(parents=True, exist_ok=True)
-
-    threading.Thread(target=summary_worker, daemon=True).start()
-    watcher = Watcher(folder, organize_existing=args.organize_existing)
-    watcher.start()
-    threading.Thread(target=upload_worker, daemon=True).start()
+    watcher = start_background(args.organize_existing, args.watch)
+    folder = watcher.folder
     if CONFIG["cloud_bridge"] and CONFIG.get("cloud_mode", "api") == "api":
         if DRIVE_TOKEN.exists():
             say("☁️  Google Drive conectado: arquivos grandes vão para o Drive.")

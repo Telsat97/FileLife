@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FileLife</title>
+<style>
+:root{
+  --bg:#f5f6f8; --surface:#fff; --surface-2:#f0f2f5; --border:#e3e6eb;
+  --text:#16181d; --muted:#667085; --accent:#3b5bfd; --accent-soft:#e8edff;
+  --ok:#12a150; --ok-soft:#e3f6ea; --warn:#c77700; --warn-soft:#fff3dc;
+  --danger:#d93636; --danger-soft:#fde8e8; --drive:#1a73e8; --drive-soft:#e6f0fd;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+  --radius:14px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1115; --surface:#171a21; --surface-2:#1e222b; --border:#2a2f3a;
+    --text:#e8eaef; --muted:#9aa3b2; --accent:#7b93ff; --accent-soft:#232b4d;
+    --ok:#3fcf7f; --ok-soft:#163223; --warn:#f0b04a; --warn-soft:#3a2c12;
+    --danger:#ff6b6b; --danger-soft:#3d1a1a; --drive:#6ea8ff; --drive-soft:#1a2a45;
+    --shadow:none;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 16px 40px}
+
+/* topo */
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,var(--accent),#9b5bff);
+  display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px}
+.brand h1{margin:0;font-size:20px;letter-spacing:-.01em}
+.brand p{margin:0;color:var(--muted);font-size:13px}
+.top-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.btn{border:1px solid var(--border);background:var(--surface);border-radius:10px;padding:8px 14px;
+  display:inline-flex;align-items:center;gap:8px;box-shadow:var(--shadow);transition:background .15s}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.small{padding:5px 10px;font-size:13px;border-radius:8px}
+.btn.ghost{background:transparent;box-shadow:none;border-color:transparent}
+.btn.ghost:hover{background:var(--surface-2)}
+.btn.danger{color:var(--danger)}
+.btn:disabled{opacity:.6;cursor:default}
+
+.google-btn{background:#fff;color:#1f1f1f;border:1px solid #dadce0;border-radius:999px;padding:9px 18px;
+  font-weight:600;display:inline-flex;align-items:center;gap:10px;box-shadow:var(--shadow)}
+.google-btn:hover{background:#f7f8f8}
+.google-btn svg{width:18px;height:18px}
+
+.account{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);
+  border-radius:999px;padding:4px 6px 4px 4px;box-shadow:var(--shadow)}
+.avatar{width:32px;height:32px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-weight:700;overflow:hidden}
+.avatar img{width:100%;height:100%;object-fit:cover}
+.account .who{line-height:1.2;max-width:220px}
+.account .who b{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.account .who span{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+
+/* banner de conexão */
+.connect{background:linear-gradient(135deg,var(--drive-soft),var(--accent-soft));border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;display:flex;gap:16px;align-items:center;justify-content:space-between;
+  flex-wrap:wrap;margin-bottom:20px}
+.connect h2{margin:0 0 4px;font-size:17px}
+.connect p{margin:0;color:var(--muted);max-width:620px}
+.connect .note{font-size:12.5px;margin-top:8px}
+.connect code{background:var(--surface);padding:1px 6px;border-radius:6px;font-size:12px}
+
+/* cards */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+.stat{padding:16px}
+.stat .label{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:6px}
+.stat .value{font-size:26px;font-weight:700;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px}
+@media (max-width:960px){.grid{grid-template-columns:1fr}}
+
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;
+  border-bottom:1px solid var(--border);flex-wrap:wrap}
+.panel-head h3{margin:0;font-size:15px}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.search{border:1px solid var(--border);background:var(--surface-2);border-radius:10px;padding:7px 12px;min-width:0;width:200px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)}
+.chip{border:1px solid var(--border);background:var(--surface);border-radius:999px;padding:4px 12px;font-size:13px}
+.chip.on{background:var(--text);color:var(--surface);border-color:var(--text)}
+
+/* lista de arquivos */
+.files{list-style:none;margin:0;padding:0}
+.file{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 16px;
+  border-bottom:1px solid var(--border)}
+.file:last-child{border-bottom:0}
+.ficon{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;font-size:20px;background:var(--surface-2)}
+.fname{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fmeta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:3px;color:var(--muted);font-size:12.5px}
+.badge{border-radius:6px;padding:1px 7px;font-size:12px;font-weight:600;white-space:nowrap}
+.b-tag{background:var(--danger-soft);color:var(--danger)}
+.b-tag.LEITURA{background:var(--accent-soft);color:var(--accent)}
+.b-tag.CONTRATO,.b-tag.FINANCEIRO{background:var(--warn-soft);color:var(--warn)}
+.b-ok{background:var(--ok-soft);color:var(--ok)}
+.b-warn{background:var(--warn-soft);color:var(--warn)}
+.b-danger{background:var(--danger-soft);color:var(--danger)}
+.b-drive{background:var(--drive-soft);color:var(--drive)}
+.b-pc{background:var(--surface-2);color:var(--muted)}
+.factions{display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.factions select{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:4px 6px;font-size:13px}
+.empty{padding:40px 16px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--text);font-size:15px;margin-bottom:4px}
+@media (max-width:640px){
+  .file{grid-template-columns:36px minmax(0,1fr)}
+  .factions{grid-column:1 / -1;justify-content:flex-start}
+  .search{width:100%}
+}
+
+/* atividade */
+.feed{list-style:none;margin:0;padding:6px 0;max-height:560px;overflow:auto}
+.feed li{padding:8px 16px;font-size:13px;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed var(--border)}
+.feed li:last-child{border-bottom:0}
+.feed time{display:block;color:var(--muted);font-size:11.5px}
+
+/* modal */
+.overlay{position:fixed;inset:0;background:rgba(10,12,16,.45);display:none;align-items:center;justify-content:center;padding:16px;z-index:10}
+.overlay.open{display:flex}
+.modal{background:var(--surface);border-radius:16px;max-width:620px;width:100%;max-height:88vh;overflow:auto;border:1px solid var(--border)}
+.modal header{margin:0;padding:16px 18px;border-bottom:1px solid var(--border)}
+.modal header h3{margin:0;font-size:16px}
+.modal .body{padding:18px}
+.modal .foot{padding:14px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+.form-row{display:grid;grid-template-columns:200px minmax(0,1fr);gap:10px;align-items:center;margin-bottom:12px}
+.form-row label{color:var(--muted)}
+.form-row input[type=text],.form-row input[type=number],.form-row select{border:1px solid var(--border);
+  background:var(--surface-2);border-radius:8px;padding:7px 10px;width:100%}
+.section-title{font-weight:700;margin:18px 0 10px}
+.section-title:first-child{margin-top:0}
+@media (max-width:560px){.form-row{grid-template-columns:1fr;gap:4px}}
+.summary-text{white-space:pre-wrap;line-height:1.6}
+
+/* toast */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--text);color:var(--surface);
+  padding:10px 16px;border-radius:10px;opacity:0;transition:all .2s;pointer-events:none;z-index:20;max-width:90vw}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.spin{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .7s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">F</div>
+      <div><h1>FileLife</h1><p id="watching">Organização automática dos seus arquivos</p></div>
+    </div>
+    <div class="top-actions">
+      <button class="btn" onclick="act('open_organized')">📂 Pasta organizada</button>
+      <button class="btn" onclick="act('report')">📊 Relatório</button>
+      <button class="btn" onclick="openSettings()">⚙️ Configurações</button>
+      <div id="accountSlot"></div>
+    </div>
+  </header>
+
+  <section id="connect" class="connect" hidden>
+    <div>
+      <h2>Conecte seu Google Drive</h2>
+      <p>Entre com sua conta Google e os arquivos grandes vão direto para o seu Drive, liberando espaço no PC.
+        Você abre tudo pelo navegador, sem instalar nada.</p>
+      <p class="note" id="credNote" hidden>⚠️ Falta o arquivo de credenciais do Google em
+        <code>~/.filelife/google_credentials.json</code> — veja o README, seção “Configurar o Google Drive”.</p>
+      <p class="note" id="loginErr" hidden></p>
+    </div>
+    <button class="google-btn" id="loginBig" onclick="login()"></button>
+  </section>
+
+  <section class="stats" id="stats"></section>
+
+  <div class="grid">
+    <section class="card">
+      <div class="panel-head">
+        <h3>Arquivos monitorados</h3>
+        <div class="tools">
+          <input class="search" id="search" placeholder="Buscar arquivo..." oninput="renderFiles()">
+          <button class="btn small" onclick="act('cleanup')">🧹 Limpar expirados</button>
+        </div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <ul class="files" id="files"></ul>
+    </section>
+    <aside class="card">
+      <div class="panel-head"><h3>Atividade</h3></div>
+      <ul class="feed" id="feed"></ul>
+    </aside>
+  </div>
+</div>
+
+<div class="overlay" id="overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <header><h3 id="mTitle"></h3></header>
+    <div class="body" id="mBody"></div>
+    <div class="foot" id="mFoot"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const G_LOGO = '<svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+const ICONS = {"Documentos":"📄","Imagens":"🖼️","Vídeos":"🎬","Áudio":"🎵","Arquivos Compactados":"🗜️","Instaladores":"💿","Outros":"📦"};
+const DURATIONS = [["", "Prazo..."],["1d","+1 dia"],["1w","+1 semana"],["1m","+1 mês"],["3m","+3 meses"],["1y","+1 ano"],["never","Manter sempre"]];
+let S = null, filter = "Todos", lastFilesKey = "";
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body){
+  const opt = {headers:{"X-Token":TOKEN}};
+  if(body !== undefined){ opt.method="POST"; opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(()=>({message:"Erro inesperado"}));
+  if(!r.ok) throw new Error(data.message || data.error || "Erro");
+  return data;
+}
+function toast(msg){
+  const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove("show"), 3200);
+}
+
+async function refresh(){
+  try{ S = await api("/api/state"); render(); }catch(e){ console.error(e); }
+}
+function render(){
+  document.getElementById("watching").textContent = S.watching ? "Monitorando " + S.watching : "";
+  renderAccount(); renderStats(); renderChips(); renderFiles(); renderFeed();
+}
+
+function renderAccount(){
+  const slot = document.getElementById("accountSlot");
+  const acc = S.account, running = S.login.status === "running";
+  const loginLabel = running ? '<span class="spin"></span> Aguardando o navegador...' : G_LOGO + " Entrar com Google";
+  if(acc){
+    const initial = esc((acc.name || acc.email || "?")[0].toUpperCase());
+    const pic = acc.photo ? `<img src="${esc(acc.photo)}" alt="" referrerpolicy="no-referrer">` : initial;
+    slot.innerHTML = `<div class="account"><div class="avatar">${pic}</div>
+      <div class="who"><b>${esc(acc.name || "Conta Google")}</b><span>${esc(acc.email || acc.error || "")}</span></div>
+      <button class="btn small ghost" title="Abrir Google Drive" onclick="act('open_drive')">Drive ↗</button>
+      <button class="btn small ghost danger" onclick="logout()">Sair</button></div>`;
+  }else{
+    slot.innerHTML = `<button class="google-btn" onclick="login()" ${running?"disabled":""}>${loginLabel}</button>`;
+  }
+  const show = !acc && S.config.cloud_bridge && S.config.cloud_mode === "api";
+  document.getElementById("connect").hidden = !show;
+  document.getElementById("loginBig").innerHTML = loginLabel;
+  document.getElementById("loginBig").disabled = running || !S.has_credentials;
+  document.getElementById("credNote").hidden = S.has_credentials;
+  const err = document.getElementById("loginErr");
+  err.hidden = S.login.status !== "error"; err.textContent = "⚠️ " + S.login.error;
+}
+
+function renderStats(){
+  const s = S.stats;
+  const cards = [
+    ["📁","Arquivos ativos", s.active, s.active_size],
+    ["💾","Espaço liberado", s.freed, "duplicatas, expirados e Drive"],
+    ["⏱️","Tempo economizado", s.hours_saved + " h", s.organized + " arquivos organizados"],
+    ["♻️","Duplicatas evitadas", s.duplicates, ""],
+    ["☁️","No Google Drive", s.in_drive, S.account ? "sincronizado" : "não conectado"],
+  ];
+  document.getElementById("stats").innerHTML = cards.map(([i,l,v,sub]) =>
+    `<div class="card stat"><div class="label">${i} ${l}</div><div class="value">${esc(v)}</div>
+     <div class="label" style="font-size:12px">${esc(sub)}</div></div>`).join("");
+}
+
+function renderChips(){
+  const cats = ["Todos", ...new Set(S.files.map(f=>f.category))];
+  if(!cats.includes(filter)) filter = "Todos";
+  document.getElementById("chips").innerHTML = cats.map(c =>
+    `<button class="chip ${c===filter?"on":""}" onclick="filter='${esc(c)}';lastFilesKey='';renderChips();renderFiles()">${esc(c)}</button>`).join("");
+}
+
+function expiryBadge(f){
+  if(f.days_left === null) return '<span class="badge b-ok">📌 sem prazo</span>';
+  const cls = f.days_left <= 1 ? "b-danger" : f.days_left <= 7 ? "b-warn" : "b-ok";
+  const txt = f.days_left <= 0 ? "expira agora" : f.days_left < 1 ? "expira hoje" : `expira em ${Math.round(f.days_left)}d`;
+  return `<span class="badge ${cls}" title="${esc(f.expiry)}">⏳ ${txt}</span>`;
+}
+
+function renderFiles(){
+  const q = document.getElementById("search").value.toLowerCase();
+  const list = S.files.filter(f => (filter==="Todos" || f.category===filter) &&
+    (!q || f.name.toLowerCase().includes(q) || f.original.toLowerCase().includes(q)));
+  const key = JSON.stringify([list, S.account ? 1 : 0, q, filter]);
+  if(key === lastFilesKey) return;          // evita redesenhar enquanto o usuário interage
+  if(document.activeElement && document.activeElement.tagName === "SELECT") return;
+  lastFilesKey = key;
+  const ul = document.getElementById("files");
+  if(!list.length){
+    ul.innerHTML = `<li class="empty"><b>${S.files.length ? "Nada encontrado" : "Tudo limpo por aqui ✨"}</b>
+      ${S.files.length ? "Tente outra busca ou categoria." : "Baixe um arquivo e ele aparece aqui organizado automaticamente."}</li>`;
+    return;
+  }
+  ul.innerHTML = list.map(f => {
+    const where = f.where === "drive" ? '<span class="badge b-drive">☁️ Google Drive</span>'
+                : f.where === "nuvem" ? '<span class="badge b-drive">☁️ Nuvem</span>' : '<span class="badge b-pc">💻 PC</span>';
+    const tag = f.tag ? `<span class="badge b-tag ${esc(f.tag)}">${esc(f.tag)}</span>` : "";
+    const opts = DURATIONS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    return `<li class="file">
+      <div class="ficon">${ICONS[f.category] || "📦"}</div>
+      <div style="min-width:0">
+        <div class="fname" title="${esc(f.name)}">${esc(f.original)}</div>
+        <div class="fmeta">${tag}${expiryBadge(f)}${where}<span>${esc(f.size)}</span><span>· #${f.id}</span></div>
+      </div>
+      <div class="factions">
+        <button class="btn small" onclick="act('open',${f.id})">Abrir</button>
+        ${f.category==="Documentos" ? `<button class="btn small" onclick="summary(${f.id})">${f.has_summary?"🧠 Resumo":"🧠 Resumir"}</button>` : ""}
+        ${f.versions > 1 ? `<button class="btn small" onclick="versions(${f.id})">🕘 ${f.versions}</button>` : ""}
+        ${f.where === "pc" ? `<button class="btn small" title="Enviar para o Google Drive" onclick="act('cloud',${f.id})">☁️ Drive</button>` : ""}
+        <select onchange="if(this.value){extend(${f.id},this.value)}">${opts}</select>
+        <button class="btn small ghost danger" title="Expirar agora" onclick="expireNow(${f.id})">✕</button>
+      </div></li>`;
+  }).join("");
+}
+
+function renderFeed(){
+  const fmt = ts => new Date(ts*1000).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+  document.getElementById("feed").innerHTML = S.activity.length
+    ? S.activity.map(a => `<li><time>${fmt(a.ts)}</time>${esc(a.msg.replace(/\s*\(use '[^)]*\)/g,"").replace(/\s*— abra com '[^']*'/g,"").trim())}</li>`).join("")
+    : '<li style="color:var(--muted)">Nenhuma atividade ainda.</li>';
+}
+
+async function act(action, id, value){
+  try{ const r = await api("/api/action", {action, id, value}); toast(r.message); refresh(); return r; }
+  catch(e){ toast("⚠️ " + e.message); }
+}
+async function extend(id, v){ lastFilesKey=""; document.activeElement.blur(); await act("extend", id, v); }
+async function expireNow(id){
+  const mode = S.config.on_expire === "delete" ? "apagado" : "movido para o Arquivo Frio";
+  if(confirm(`Expirar o arquivo #${id} agora? Ele será ${mode}.`)) act("expire", id);
+}
+async function login(){ try{ const r = await api("/api/login", {}); toast(r.message); refresh(); }catch(e){ toast("⚠️ "+e.message); } }
+async function logout(){ if(confirm("Desconectar sua conta Google?")){ try{ await api("/api/logout", {}); toast("Conta desconectada"); refresh(); }catch(e){ toast("⚠️ "+e.message);} } }
+
+function modal(title, body, foot){
+  document.getElementById("mTitle").textContent = title;
+  document.getElementById("mBody").innerHTML = body;
+  document.getElementById("mFoot").innerHTML = foot || '<button class="btn" onclick="closeModal()">Fechar</button>';
+  document.getElementById("overlay").classList.add("open");
+}
+function closeModal(){ document.getElementById("overlay").classList.remove("open"); }
+document.addEventListener("keydown", e => { if(e.key==="Escape") closeModal(); });
+
+async function summary(id){
+  const r = await act("summary", id);
+  if(r && r.message.startsWith("#")){
+    const [title, ...rest] = r.message.split("\n");
+    modal(title.replace(/^#\s*/,""), `<div class="summary-text">${esc(rest.join("\n").trim())}</div>`);
+  }
+}
+async function versions(id){
+  const vs = await api("/api/versions?id=" + id);
+  modal(`Versões salvas do #${id}`, vs.map((v,i) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span>${i+1}. ${esc(v)}</span><button class="btn small" onclick="restore(${id},${i+1})">Restaurar</button></div>`).join(""));
+}
+async function restore(id, i){
+  if(!confirm("Restaurar esta versão? A versão atual também fica guardada.")) return;
+  try{ const r = await api("/api/restore", {id, index:i}); toast(r.message); closeModal(); refresh(); }catch(e){ toast("⚠️ "+e.message); }
+}
+
+function openSettings(){
+  const c = S.config;
+  const durSel = (cat) => {
+    const cur = (c.default_expiry||{})[cat] || "1w";
+    const opts = [["1d","1 dia"],["3d","3 dias"],["1w","1 semana"],["2w","2 semanas"],["1m","1 mês"],["3m","3 meses"],["1y","1 ano"],["never","Nunca"]];
+    if(!opts.some(o=>o[0]===cur)) opts.push([cur,cur]);
+    return `<select data-cat="${esc(cat)}">${opts.map(([v,l])=>`<option value="${v}" ${v===cur?"selected":""}>${l}</option>`).join("")}</select>`;
+  };
+  const yes = (v) => v ? "selected" : "";
+  modal("Configurações", `
+    <div class="section-title">Geral</div>
+    <div class="form-row"><label>Pasta monitorada</label><input type="text" id="cWatch" value="${esc(c.watch_dir)}" placeholder="Downloads (padrão)"></div>
+    <div class="form-row"><label>Quando um arquivo expira</label><select id="cExpire">
+      <option value="archive" ${yes(c.on_expire==="archive")}>Guardar no Arquivo Frio</option>
+      <option value="delete" ${yes(c.on_expire==="delete")}>Apagar</option></select></div>
+    <div class="form-row"><label>Arquivos repetidos</label><select id="cDedupe">
+      <option value="keep_old" ${yes(c.dedupe==="keep_old")}>Manter o antigo, apagar o novo</option>
+      <option value="keep_new" ${yes(c.dedupe==="keep_new")}>Manter o novo, apagar o antigo</option></select></div>
+    <div class="section-title">Prazo padrão por categoria</div>
+    ${S.categories.map(cat => `<div class="form-row"><label>${ICONS[cat]||""} ${esc(cat)}</label>${durSel(cat)}</div>`).join("")}
+    <div class="section-title">Google Drive</div>
+    <div class="form-row"><label>Enviar arquivos grandes</label><select id="cCloud">
+      <option value="1" ${yes(c.cloud_bridge)}>Sim</option><option value="0" ${yes(!c.cloud_bridge)}>Não</option></select></div>
+    <div class="form-row"><label>A partir de (MB)</label><input type="number" min="0" id="cMin" value="${esc(c.cloud_min_mb)}"></div>
+    <div class="form-row"><label>Categorias enviadas</label><div id="cCats">${S.categories.map(cat =>
+      `<label style="display:inline-flex;gap:4px;margin:0 10px 4px 0;color:var(--text)"><input type="checkbox" value="${esc(cat)}" ${(c.cloud_categories||[]).includes(cat)?"checked":""}> ${esc(cat)}</label>`).join("")}</div></div>
+    <div class="section-title">Inteligência artificial</div>
+    <div class="form-row"><label>Resumir documentos</label><select id="cAI">
+      <option value="1" ${yes(c.ai_summary)}>Sim</option><option value="0" ${yes(!c.ai_summary)}>Não</option></select></div>`,
+    '<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="saveSettings()">Salvar</button>');
+}
+async function saveSettings(){
+  const exp = {}; document.querySelectorAll("[data-cat]").forEach(s => exp[s.dataset.cat] = s.value);
+  const body = {
+    watch_dir: document.getElementById("cWatch").value.trim(),
+    on_expire: document.getElementById("cExpire").value,
+    dedupe: document.getElementById("cDedupe").value,
+    default_expiry: exp,
+    cloud_bridge: document.getElementById("cCloud").value === "1",
+    cloud_min_mb: Number(document.getElementById("cMin").value || 0),
+    cloud_categories: [...document.querySelectorAll("#cCats input:checked")].map(i => i.value),
+    ai_summary: document.getElementById("cAI").value === "1",
+  };
+  try{ const r = await api("/api/config", body); toast(r.message); closeModal(); refresh(); }catch(e){ toast("⚠️ "+e.message); }
+}
+
+refresh();
+setInterval(refresh, 2500);
+</script>
+</body>
+</html>
