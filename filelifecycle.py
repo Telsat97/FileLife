@@ -77,9 +77,11 @@ DEFAULT_CONFIG = {
     "ai_model": "claude-opus-5-5",
     "ai_categories": ["Documentos"],
     "ai_max_mb": 30,
-    # Função 4: Cloud Bridge — pasta sincronizada do Google Drive/OneDrive/Dropbox.
-    # Vazio = detecta automaticamente.
+    # Função 4: Cloud Bridge — manda arquivos grandes para a nuvem.
+    # "google_drive" (padrão) ou "outro" (OneDrive/Dropbox primeiro).
+    # cloud_dir vazio = detecta automaticamente (ex.: G:/Meu Drive).
     "cloud_bridge": True,
+    "cloud_provider": "google_drive",
     "cloud_dir": "",
     "cloud_min_mb": 200,
     "cloud_categories": ["Vídeos", "Arquivos Compactados"],
@@ -620,31 +622,52 @@ def summary_worker():
 # Função 4: Cloud Bridge
 # ---------------------------------------------------------------------------
 
-def detect_cloud_dir():
-    """Procura a pasta sincronizada do Google Drive, OneDrive ou Dropbox."""
-    if CONFIG.get("cloud_dir"):
-        p = Path(CONFIG["cloud_dir"]).expanduser()
-        return p if p.is_dir() else None
+def _google_drive_candidates():
     home = Path.home()
-    candidates = []
-    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):  # Windows
-        if os.environ.get(var):
-            candidates.append(Path(os.environ[var]))
+    out = []
+    if sys.platform == "win32":
+        # Google Drive para computador monta uma unidade (geralmente G:)
+        for letter in "GHIJKLMNOPQRSTUVWXYZDEF":
+            out += [Path(f"{letter}:/My Drive"), Path(f"{letter}:/Meu Drive")]
     cloud_storage = home / "Library" / "CloudStorage"  # macOS
     if cloud_storage.is_dir():
         for d in sorted(cloud_storage.iterdir()):
             if d.name.startswith("GoogleDrive"):
-                candidates += [d / "My Drive", d / "Meu Drive"]
-            elif d.name.startswith(("OneDrive", "Dropbox")):
-                candidates.append(d)
-    if sys.platform == "win32":
-        for letter in "GHIJ":
-            candidates += [Path(f"{letter}:/My Drive"), Path(f"{letter}:/Meu Drive")]
-    candidates += [home / "Google Drive" / "My Drive", home / "Google Drive",
-                   home / "My Drive", home / "OneDrive", home / "Dropbox"]
+                out += [d / "My Drive", d / "Meu Drive"]
+    # Modo "espelhar arquivos" ou instalações antigas
+    out += [home / "My Drive", home / "Meu Drive",
+            home / "Google Drive" / "My Drive", home / "Google Drive" / "Meu Drive",
+            home / "Google Drive"]
+    return out
+
+
+def _other_cloud_candidates():
+    home = Path.home()
+    out = [Path(os.environ[v]) for v in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+           if os.environ.get(v)]
+    cloud_storage = home / "Library" / "CloudStorage"
+    if cloud_storage.is_dir():
+        out += [d for d in sorted(cloud_storage.iterdir())
+                if d.name.startswith(("OneDrive", "Dropbox"))]
+    return out + [home / "OneDrive", home / "Dropbox"]
+
+
+def detect_cloud_dir():
+    """Procura a pasta da nuvem: Google Drive primeiro, depois OneDrive/Dropbox."""
+    if CONFIG.get("cloud_dir"):
+        p = Path(CONFIG["cloud_dir"]).expanduser()
+        return p if p.is_dir() else None
+    candidates = _google_drive_candidates()
+    if CONFIG.get("cloud_provider", "google_drive") != "google_drive":
+        candidates = _other_cloud_candidates() + candidates
+    else:
+        candidates += _other_cloud_candidates()
     for c in candidates:
-        if c.is_dir():
-            return c
+        try:
+            if c.is_dir():
+                return c
+        except OSError:  # unidade de disco inexistente/sem mídia no Windows
+            continue
     return None
 
 

@@ -60,5 +60,11 @@ Todas implementadas ✅
 
 **Resumo com IA.** PDFs, `.docx` e arquivos de texto da categoria Documentos são resumidos em 3 tópicos pelo Claude (modelo `claude-opus-5-5`, configurável em `ai_model`). O resumo fica salvo em `<arquivo>.resumo.md`, ao lado do original. Ele roda em segundo plano, sem travar o monitor. O fallback automático da API (`fallbacks: "default"`) está ativado: se o modelo recusar um conteúdo, outro modelo tenta resumir. Arquivos acima de `ai_max_mb` (padrão 30 MB) são pulados. Para desligar, use `"ai_summary": false`.
 
-**Cloud Bridge.** Vídeos e arquivos compactados acima de `cloud_min_mb` (padrão 200 MB) vão para a pasta `FileLife/` dentro da pasta sincronizada do Google Drive, OneDrive ou Dropbox, que é detectada automaticamente (ou definida em `cloud_dir`). No lugar do arquivo fica um atalho: `.url` no Windows e link simbólico no Mac/Linux. Quando expiram, eles são arquivados dentro da própria nuvem.
-> Para liberar espaço de verdade no SSD, deixe o app da nuvem no modo "streaming" ou "Arquivos sob demanda". Assim o arquivo fica só online até você abrir.
+**Cloud Bridge (Google Drive).** Vídeos e arquivos compactados acima de `cloud_min_mb` (padrão 200 MB) vão para `Meu Drive/FileLife/<Categoria>` no Google Drive. No lugar do arquivo fica um atalho: `.url` no Windows e link simbólico no Mac/Linux. Quando expiram, eles são arquivados em `Meu Drive/FileLife/_ArquivoFrio`, sem voltar para o disco.
+
+Como configurar:
+1. Instale o **Google Drive para computador**: https://www.google.com/drive/download/
+2. Faça login. Em Configurações → Google Drive, escolha **"Fazer streaming de arquivos"**. Nesse modo, os arquivos ficam só na nuvem e não ocupam o SSD.
+3. Pronto. O FileLife encontra a unidade (geralmente `G:\Meu Drive`) sozinho. Se não encontrar, defina `"cloud_dir": "G:/Meu Drive"` em `~/.filelife/config.json`.
+
+Para usar OneDrive ou Dropbox em vez do Google Drive, defina `"cloud_provider": "outro"`. Para mandar mais coisas para a nuvem, diminua `cloud_min_mb` ou acrescente categorias em `cloud_categories`.
