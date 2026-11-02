@@ -1,0 +1,31 @@
+name: Publicar site
+
+# Só publica quando você mandar (aba Actions → "Publicar site" → Run workflow).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Conferir que o ID do cliente do Google foi configurado
+        run: grep -Eq 'googleClientId: "[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com"' web/config.js || (echo "::error::Preencha googleClientId em web/config.js" && exit 1)
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

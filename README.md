@@ -2,7 +2,52 @@
 
 Sistema de Gestão de Ciclo de Vida de Arquivos: monitora a pasta **Downloads**, categoriza, renomeia com timestamp, move para `~/OrganizedFiles/<Categoria>` e registra uma **data de expiração** em SQLite. Arquivos expirados são removidos automaticamente.
 
-## Comece aqui
+## FileLife Web (versão principal)
+
+Site que roda no navegador, em **qualquer sistema** (Windows, Mac, Linux, celular), **sem servidor**: os arquivos vão direto do navegador do usuário para o Google Drive dele. Fica em `web/`.
+
+- **Entrar com Google:** o FileLife cria a pasta `FileLife` no Drive e só enxerga o que ele mesmo criou (permissão `drive.file`).
+- **Organizar:** arraste arquivos ou conecte uma pasta do computador (Chrome/Edge). Eles vão para `FileLife/<Categoria>` com nome padronizado e tag (`[URGENTE]`, `[CONTRATO]`…).
+- **Sem duplicatas:** a impressão digital SHA-256 impede guardar o mesmo arquivo duas vezes.
+- **Prazo de validade:** cada categoria tem um prazo padrão. Vencido o prazo, o arquivo vai para `FileLife/_ArquivoFrio` (dá para restaurar) ou para a lixeira do Drive. Nada é apagado de vez.
+- **Libera espaço no PC:** a cópia do computador só é removida depois de o Drive confirmar que recebeu o arquivo idêntico.
+- **Resumo com IA (opcional):** PDFs e textos resumidos em 3 tópicos, com a chave da Anthropic do próprio usuário, que fica só no navegador dele.
+- **Relatório** com estatísticas, que dá para imprimir ou salvar em PDF.
+
+**Segurança:** o token do Google fica só na memória da aba (some ao fechar ou ao clicar em "Sair", que também revoga o acesso). A tela nunca monta HTML a partir de dados de fora, e a política de segurança (CSP) restringe o que a página pode carregar e com quem pode falar. O site não abre dentro de molduras de outros sites, e envios grandes são retomados se a conexão cair. Testado de ponta a ponta com Google e IA simulados.
+
+> **Limitação dos navegadores:** um site não consegue vigiar a pasta Downloads com a aba fechada. Com a aba aberta, o envio automático da pasta conectada funciona (Chrome/Edge). Os prazos são processados sempre que o site é aberto.
+
+### Colocar o site no ar
+
+1. **Google Cloud** (uma vez, ~5 min) em https://console.cloud.google.com:
+   1. Crie um projeto (ex.: "FileLife").
+   2. **APIs e serviços → Biblioteca:** ative a **Google Drive API**.
+   3. **APIs e serviços → Tela de permissão OAuth:** escolha "Externo". Preencha o nome do app, o e-mail de suporte, a página inicial (`https://telsat97.github.io/FileLife/`) e a política de privacidade (`https://telsat97.github.io/FileLife/privacy.html`). Em **Escopos**, adicione `.../auth/drive.file`. Em **Usuários de teste**, adicione o seu Gmail.
+   4. **Credenciais → Criar credenciais → ID do cliente OAuth → "Aplicativo da Web"**. Em **Origens JavaScript autorizadas**, coloque `https://telsat97.github.io`.
+   5. Copie o **ID do cliente** (termina em `.apps.googleusercontent.com`). Ele é público, não é segredo.
+2. Cole o ID em `web/config.js`, no campo `googleClientId`, e faça o commit.
+3. No GitHub: **Settings → Pages → Source: GitHub Actions**. Depois, em **Actions → "Publicar site" → Run workflow**.
+4. Abra https://telsat97.github.io/FileLife/ e clique em **Entrar com Google**.
+
+Para liberar o acesso a qualquer pessoa (e não só aos usuários de teste), clique em **Publicar app** na tela de permissão OAuth. Como `drive.file` não é um escopo sensível, a verificação do Google é simples.
+
+**Testar no seu computador:**
+```bash
+cd web
+```
+```bash
+python3 -m http.server 8080
+```
+Para testar assim, adicione `http://localhost:8080` às origens autorizadas do ID do cliente.
+
+---
+
+## Versão para PC (opcional)
+
+Programa para quem quer a pasta Downloads organizada em segundo plano, mesmo com o navegador fechado.
+
+### Comece aqui
 
 1. **Baixe o programa** em [Releases](https://github.com/Telsat97/FileLife/releases): `FileLife-Windows.zip` ou `FileLife-Mac.zip`. Extraia e abra. Não precisa instalar Python.
 2. **(Opcional) Google Drive:** crie as credenciais no Google Cloud (passo a passo abaixo, em "Configurar o Google Drive", ~5 min). No FileLife, clique em **📄 Importar credenciais do Google** e depois em **Entrar com Google**.
