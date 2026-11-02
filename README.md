@@ -2,7 +2,34 @@
 
 Seus arquivos organizados no Google Drive, com prazo de validade, sem duplicatas e com resumo por IA. Funciona no navegador, em qualquer sistema, sem servidor. Há também uma versão opcional para PC, que vigia a pasta Downloads em segundo plano.
 
-## FileLife Web (versão principal)
+## FileLife para PC (versão principal)
+
+Quando um download termina, aparece uma janelinha no canto da tela:
+
+1. **Onde guardar?** 💻 Manter no PC ou ☁️ Mandar pro Google Drive
+2. **Por quanto tempo?** 1 dia · 3 dias · 1 semana · 1 mês · 3 meses · 1 ano · Para sempre
+
+Quando o prazo acaba, o arquivo é **apagado sozinho**: no PC vai para a Lixeira, no Drive vai para a lixeira do Drive. As duas permitem recuperar.
+
+- **Mandar pro Drive:** o arquivo vai para `Meu Drive/FileLife/<Categoria>`. A cópia do PC só é apagada depois de o Drive confirmar que recebeu o arquivo idêntico (SHA-256) e de o arquivo não ter mudado durante o envio. Se der erro, o arquivo continua no PC.
+- **Meus arquivos:** lista tudo com o prazo de cada um. Dá para abrir, mudar o prazo ou apagar na hora. Os arquivos enviados ao Drive aparecem também no [site](https://telsat97.github.io/FileLife/).
+- **Opções:** pasta vigiada (padrão: Downloads), só perguntar para arquivos acima de X MB, conectar o Google Drive, abrir junto com o computador, pausar.
+- Fica com um ícone perto do relógio. Abrir o programa de novo mostra a lista.
+- Arquivos temporários (`.crdownload`, `.part`), ocultos e de sistema são ignorados. Downloads em andamento esperam terminar. Um arquivo renomeado continua sendo reconhecido.
+- **Custo zero.** Na primeira vez, o Windows pode mostrar "O Windows protegeu o computador": clique em **Mais informações → Executar assim mesmo**. O programa ainda não tem assinatura digital, que é paga.
+
+**Baixar o .exe:** em [Actions → "Gerar executáveis"](https://github.com/Telsat97/FileLife/actions/workflows/build.yml), abra a execução mais recente com ✅ e baixe **FileLife-Windows** em *Artifacts* (precisa estar logado no GitHub). Extraia e abra o `FileLife.exe`.
+
+**Conectar o Google Drive (uma vez):** o programa precisa de credenciais do tipo **"App para computador"** do mesmo projeto no Google Cloud:
+1. Em [Credenciais](https://console.cloud.google.com/apis/credentials), clique em **Criar credenciais → ID do cliente OAuth → App para computador** e baixe o JSON.
+2. No FileLife: **Opções → Importar credenciais…** (escolha o JSON) → **Conectar**.
+   - Para distribuir sem esse passo: salve o conteúdo do JSON como segredo `GOOGLE_CLIENT_JSON` em *Settings → Secrets and variables → Actions*. Os próximos .exe já vêm com ele, e o usuário só clica em "Conectar". Não coloque esse JSON no repositório.
+
+Rodar pelo Python: `pip install google-api-python-client google-auth-oauthlib send2trash pystray pillow` e depois `python filelife_desktop.py`.
+
+---
+
+## FileLife Web (painel no navegador)
 
 Site que roda no navegador, em **qualquer sistema** (Windows, Mac, Linux, celular), **sem servidor**: os arquivos vão direto do navegador do usuário para o Google Drive dele. Fica em `web/`.
 

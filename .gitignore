@@ -5,3 +5,4 @@ LifecycleLog/
 dist/
 build/
 *.spec
+google_client.json

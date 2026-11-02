@@ -300,13 +300,16 @@ def save_state(**changes):
 AUTOSTART_NAME = "FileLife"
 
 
+ENTRY_SCRIPT = "filelife_app.py"  # o programa que abre junto com o computador
+
+
 def _autostart_command():
     if getattr(sys, "frozen", False):  # .exe / .app gerado pelo PyInstaller
         return [sys.executable, "--no-open"]
     python = Path(sys.executable)
     if os.name == "nt" and (python.parent / "pythonw.exe").exists():
         python = python.parent / "pythonw.exe"  # sem janela preta de terminal
-    return [str(python), str(Path(__file__).resolve().with_name("filelife_app.py")), "--no-open"]
+    return [str(python), str(Path(__file__).resolve().with_name(ENTRY_SCRIPT)), "--no-open"]
 
 
 def _mac_plist():
@@ -1175,9 +1178,14 @@ def save_google_credentials(data):
     write_private(DRIVE_CREDENTIALS, json.dumps({"installed": inst}))
 
 
+BUNDLED_CREDENTIALS = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "google_client.json"
+
+
 def drive_login():
     """Abre o navegador para você autorizar o FileLife no seu Google Drive (uma vez)."""
     _, _, InstalledAppFlow, _, _ = _drive_libs()
+    if not DRIVE_CREDENTIALS.exists() and BUNDLED_CREDENTIALS.exists():
+        save_google_credentials(BUNDLED_CREDENTIALS.read_text(encoding="utf-8"))
     if not DRIVE_CREDENTIALS.exists():
         raise ValueError(f"coloque o arquivo de credenciais do Google em {DRIVE_CREDENTIALS} "
                          "(veja o README, seção Google Drive)")
