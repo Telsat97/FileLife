@@ -2,7 +2,7 @@
 FileLifecycle Pro — Sistema de Gestão de Ciclo de Vida de Arquivos.
 
 Monitora a pasta Downloads em segundo plano, categoriza, renomeia, organiza,
-deduplica, versiona e expira arquivos automaticamente.
+deduplica, versiona, resume (IA), envia à nuvem e expira arquivos automaticamente.
 
 Uso:
     python filelifecycle.py                     # monitora ~/Downloads
@@ -70,8 +70,19 @@ DEFAULT_CONFIG = {
     # Intervalos (segundos)
     "scan_interval": 3,
     "cleanup_interval": 3600,
-    # Minutos que o "minuto" economizado vale por arquivo organizado (relatório)
+    # Minutos economizados por arquivo organizado (usado no relatório)
     "minutes_saved_per_file": 1.5,
+    # Função 2: resumo com IA (precisa de `pip install anthropic` + ANTHROPIC_API_KEY)
+    "ai_summary": True,
+    "ai_model": "claude-opus-5-5",
+    "ai_categories": ["Documentos"],
+    "ai_max_mb": 30,
+    # Função 4: Cloud Bridge — pasta sincronizada do Google Drive/OneDrive/Dropbox.
+    # Vazio = detecta automaticamente.
+    "cloud_bridge": True,
+    "cloud_dir": "",
+    "cloud_min_mb": 200,
+    "cloud_categories": ["Vídeos", "Arquivos Compactados"],
 }
 
 CATEGORIES = {
@@ -161,6 +172,11 @@ def init_db():
                 bytes INTEGER DEFAULT 0
             );
         """)
+        for col in ("summary_path TEXT", "shortcut_path TEXT", "cloud INTEGER DEFAULT 0"):
+            try:
+                conn.execute(f"ALTER TABLE files ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass  # coluna já existe
 
 
 def add_event(conn, kind, file_id=None, nbytes=0):
@@ -307,6 +323,9 @@ def process_file(path):
         add_event(conn, "organized", file_id, size)
 
     snapshot_version(file_id, new_path, category)
+    cloud_path = maybe_send_to_cloud(file_id, new_path, category, size)
+    if cloud_path is None and category in CONFIG["ai_categories"]:
+        enqueue_summary(file_id)
     log_action(f"Organizado #{file_id}: {filename} -> {new_path} (expira {fmt_ts(expiry)})")
     tag_txt = f" [{tag}]" if tag else ""
     say(f"📥 #{file_id} {filename} → {category}{tag_txt} · expira {fmt_ts(expiry)} "
@@ -383,11 +402,11 @@ def restore_version(file_id, index):
 # Expiração + Função 3: Arquivo Frio
 # ---------------------------------------------------------------------------
 
-def archive_file(path):
+def archive_file(path, extras=(), cold_dir=None):
     """Compacta em zip no Arquivo Frio. Usa senha AES se `pyzipper` estiver instalado."""
-    COLD_DIR.mkdir(parents=True, exist_ok=True)
-    month_dir = COLD_DIR / datetime.date.today().strftime("%Y-%m")
-    month_dir.mkdir(exist_ok=True)
+    extras = [Path(e) for e in extras if e and Path(e).exists()]
+    month_dir = (cold_dir or COLD_DIR) / datetime.date.today().strftime("%Y-%m")
+    month_dir.mkdir(parents=True, exist_ok=True)
     zip_path = unique_path(month_dir / f"{path.stem}.zip")
     password = None
     try:
@@ -396,11 +415,14 @@ def archive_file(path):
         with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED,
                                  encryption=pyzipper.WZ_AES) as zf:
             zf.setpassword(password.encode())
-            zf.write(path, path.name)
+            for f in [path, *extras]:
+                zf.write(f, f.name)
     except ImportError:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.write(path, path.name)
-    path.unlink()
+            for f in [path, *extras]:
+                zf.write(f, f.name)
+    for f in [path, *extras]:
+        f.unlink()
     return zip_path, password
 
 
@@ -418,14 +440,18 @@ def run_cleanup(verbose=True):
     for r in expired:
         p = Path(r["file_path"])
         if not p.exists():
+            remove_shortcut(r["shortcut_path"])
             with DB_LOCK, db() as conn:
                 conn.execute("UPDATE files SET status='missing', closed_at=? WHERE id=?",
                              (now, r["id"]))
             continue
         size = p.stat().st_size
+        remove_shortcut(r["shortcut_path"])
         try:
             if CONFIG["on_expire"] == "archive":
-                zip_path, pwd = archive_file(p)
+                # Arquivos na nuvem continuam na nuvem (não ocupam o SSD de novo)
+                cold = p.parent.parent / "_ArquivoFrio" if r["cloud"] else None
+                zip_path, pwd = archive_file(p, [r["summary_path"]], cold)
                 with DB_LOCK, db() as conn:
                     conn.execute("UPDATE files SET status='archived', archive_path=?, "
                                  "archive_password=?, closed_at=? WHERE id=?",
@@ -435,6 +461,8 @@ def run_cleanup(verbose=True):
                 say(f"🧊 #{r['id']} {p.name} expirou → Arquivo Frio ({zip_path.name})")
             else:
                 p.unlink()
+                if r["summary_path"]:
+                    Path(r["summary_path"]).unlink(missing_ok=True)
                 with DB_LOCK, db() as conn:
                     conn.execute("UPDATE files SET status='deleted', closed_at=? WHERE id=?",
                                  (now, r["id"]))
@@ -445,6 +473,235 @@ def run_cleanup(verbose=True):
             log_action(f"Erro ao expirar #{r['id']} {p}: {e}")
             say(f"❌ Erro ao expirar {p.name}: {e}")
     return len(expired)
+
+
+# ---------------------------------------------------------------------------
+# Função 2: Resumo de Conteúdo com IA (Claude)
+# ---------------------------------------------------------------------------
+
+SUMMARY_PROMPT = (
+    "Resuma este documento em exatamente 3 tópicos curtos, em português do Brasil, "
+    "no formato '- texto'. Foque no que importa para quem baixou o arquivo: do que "
+    "se trata, os pontos principais e qualquer prazo, valor ou ação necessária. "
+    "Responda apenas com os 3 tópicos."
+)
+TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".xml", ".rtf"}
+MAX_TEXT_CHARS = 600_000  # ~150k tokens; acima disso o arquivo é pulado (não truncado)
+
+SUMMARY_QUEUE = queue.Queue()
+_ai_warned = set()
+
+
+def _warn_once(key, msg):
+    if key not in _ai_warned:
+        _ai_warned.add(key)
+        say(msg)
+
+
+def extract_docx_text(path):
+    from xml.etree import ElementTree
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as zf:
+        root = ElementTree.fromstring(zf.read("word/document.xml"))
+    paragraphs = []
+    for p in root.iter(f"{ns}p"):
+        text = "".join(t.text or "" for t in p.iter(f"{ns}t"))
+        if text.strip():
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
+
+
+def build_document_block(path):
+    """Converte o arquivo num bloco de conteúdo para a API, ou None se não suportado."""
+    import base64
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+        return {"type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
+    if ext == ".docx":
+        text = extract_docx_text(path)
+    elif ext in TEXT_EXTS:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        return None
+    if not text.strip():
+        return None
+    if len(text) > MAX_TEXT_CHARS:
+        raise ValueError("documento grande demais para resumir de uma vez")
+    return {"type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": text},
+            "title": path.name}
+
+
+def summarize_file(file_id):
+    """Gera <arquivo>.resumo.md ao lado do arquivo. Retorna o caminho ou None."""
+    with DB_LOCK, db() as conn:
+        row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row or row["status"] != "active":
+        return None
+    path = Path(row["file_path"])
+    if not path.exists() or path.stat().st_size > CONFIG["ai_max_mb"] * 1024 * 1024:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        _warn_once("sdk", "💡 Resumo com IA desativado: rode `pip install anthropic` "
+                          "e defina ANTHROPIC_API_KEY para ativar.")
+        return None
+    try:
+        block = build_document_block(path)
+    except (ValueError, OSError, zipfile.BadZipFile, KeyError) as e:
+        log_action(f"Resumo #{file_id} pulado: {e}")
+        return None
+    if block is None:
+        return None
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.beta.messages.create(
+            model=CONFIG["ai_model"],
+            max_tokens=16000,
+            output_config={"effort": "low"},
+            # Se o modelo recusar por política, a API tenta outro modelo automaticamente
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            messages=[{"role": "user", "content": [block, {"type": "text", "text": SUMMARY_PROMPT}]}],
+        )
+    except anthropic.AuthenticationError:
+        _warn_once("auth", "🔑 Resumo com IA: chave da API inválida ou ausente "
+                           "(defina ANTHROPIC_API_KEY).")
+        return None
+    except anthropic.RateLimitError:
+        log_action(f"Resumo #{file_id}: limite de uso atingido, tente 'summary {file_id}' depois")
+        return None
+    except anthropic.APIStatusError as e:
+        log_action(f"Resumo #{file_id}: erro da API {e.status_code}: {e.message}")
+        return None
+    except anthropic.APIConnectionError:
+        log_action(f"Resumo #{file_id}: sem conexão")
+        return None
+    except anthropic.AnthropicError as e:  # ex.: nenhuma credencial configurada
+        _warn_once("auth", f"🔑 Resumo com IA indisponível: {e}")
+        return None
+
+    if response.stop_reason == "refusal":
+        log_action(f"Resumo #{file_id}: modelo recusou o conteúdo")
+        return None
+    text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    if not text:
+        return None
+
+    out = path.with_name(f"{path.stem}.resumo.md")
+    out.write_text(f"# Resumo: {row['original_name']}\n\n{text}\n", encoding="utf-8")
+    with DB_LOCK, db() as conn:
+        conn.execute("UPDATE files SET summary_path=? WHERE id=?", (str(out), file_id))
+    log_action(f"Resumo gerado #{file_id}: {out}")
+    say(f"🧠 #{file_id} resumido:\n{text}")
+    return out
+
+
+def enqueue_summary(file_id):
+    if CONFIG["ai_summary"]:
+        SUMMARY_QUEUE.put(file_id)
+
+
+def summary_worker():
+    """Roda os resumos numa thread separada para não travar o monitor."""
+    while True:
+        file_id = SUMMARY_QUEUE.get()
+        try:
+            summarize_file(file_id)
+        except Exception as e:
+            log_action(f"Erro no resumo #{file_id}: {e!r}")
+
+
+# ---------------------------------------------------------------------------
+# Função 4: Cloud Bridge
+# ---------------------------------------------------------------------------
+
+def detect_cloud_dir():
+    """Procura a pasta sincronizada do Google Drive, OneDrive ou Dropbox."""
+    if CONFIG.get("cloud_dir"):
+        p = Path(CONFIG["cloud_dir"]).expanduser()
+        return p if p.is_dir() else None
+    home = Path.home()
+    candidates = []
+    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):  # Windows
+        if os.environ.get(var):
+            candidates.append(Path(os.environ[var]))
+    cloud_storage = home / "Library" / "CloudStorage"  # macOS
+    if cloud_storage.is_dir():
+        for d in sorted(cloud_storage.iterdir()):
+            if d.name.startswith("GoogleDrive"):
+                candidates += [d / "My Drive", d / "Meu Drive"]
+            elif d.name.startswith(("OneDrive", "Dropbox")):
+                candidates.append(d)
+    if sys.platform == "win32":
+        for letter in "GHIJ":
+            candidates += [Path(f"{letter}:/My Drive"), Path(f"{letter}:/Meu Drive")]
+    candidates += [home / "Google Drive" / "My Drive", home / "Google Drive",
+                   home / "My Drive", home / "OneDrive", home / "Dropbox"]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def create_shortcut(link_path, target):
+    """Atalho local apontando para o arquivo na nuvem. Retorna o caminho do atalho."""
+    target = Path(target)
+    if sys.platform == "win32":
+        # .url funciona sem permissão de administrador (symlink no Windows exige)
+        link = unique_path(Path(link_path).with_name(Path(link_path).name + ".url"))
+        link.write_text(f"[InternetShortcut]\nURL={target.as_uri()}\n", encoding="utf-8")
+        return link
+    link = unique_path(Path(link_path))
+    os.symlink(target, link)
+    return link
+
+
+def remove_shortcut(shortcut_path):
+    if shortcut_path:
+        p = Path(shortcut_path)
+        if p.is_symlink() or p.exists():
+            p.unlink()
+
+
+def send_to_cloud(file_id, path):
+    """Move o arquivo para a pasta da nuvem e deixa um atalho no lugar."""
+    cloud_root = detect_cloud_dir()
+    if cloud_root is None:
+        raise ValueError("Nenhuma pasta do Google Drive/OneDrive/Dropbox encontrada. "
+                         "Defina 'cloud_dir' no config.json.")
+    path = Path(path)
+    dest_dir = cloud_root / "FileLife" / path.parent.name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = unique_path(dest_dir / path.name)
+    shutil.move(str(path), str(dest))
+    shortcut = create_shortcut(path, dest)
+    with DB_LOCK, db() as conn:
+        conn.execute("UPDATE files SET file_path=?, shortcut_path=?, cloud=1, mtime=? WHERE id=?",
+                     (str(dest), str(shortcut), dest.stat().st_mtime, file_id))
+    log_action(f"Cloud Bridge #{file_id}: {path} -> {dest} (atalho {shortcut})")
+    return dest
+
+
+def maybe_send_to_cloud(file_id, path, category, size):
+    if not CONFIG["cloud_bridge"] or category not in CONFIG["cloud_categories"]:
+        return None
+    if size < CONFIG["cloud_min_mb"] * 1024 * 1024:
+        return None
+    try:
+        dest = send_to_cloud(file_id, path)
+    except ValueError as e:
+        _warn_once("cloud", f"☁️  Cloud Bridge: {e}")
+        return None
+    except OSError as e:
+        log_action(f"Cloud Bridge #{file_id} falhou: {e}")
+        return None
+    say(f"☁️  #{file_id} ({human_size(size)}) enviado para {dest.parent} — atalho local criado.")
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +847,8 @@ HELP = """Comandos:
   versions <id>          lista versões salvas
   restore <id> <n>       restaura a versão n
   archive <id>           mostra onde está o zip e a senha
+  summary <id>           gera/regera o resumo com IA
+  cloud <id>             envia para a nuvem e deixa um atalho
   cleanup                processa expirados agora
   report [dias]          gera relatório (padrão 7 dias)
   help | quit"""
@@ -675,6 +934,21 @@ def handle_command(line):
                 say("Esse arquivo não está no Arquivo Frio.")
             else:
                 say(f"🧊 {r['archive_path']}\n   senha: {r['archive_password'] or '(sem senha)'}")
+        elif cmd == "summary" and len(args) == 1:
+            say("🧠 Resumindo...")
+            if not summarize_file(int(args[0])):
+                say("Não foi possível resumir (formato não suportado, IA desativada ou erro — veja o log).")
+        elif cmd == "cloud" and len(args) == 1:
+            with DB_LOCK, db() as conn:
+                r = conn.execute("SELECT file_path, cloud FROM files WHERE id=? AND status='active'",
+                                 (int(args[0]),)).fetchone()
+            if not r:
+                say("Arquivo não encontrado.")
+            elif r["cloud"]:
+                say(f"☁️  Já está na nuvem: {r['file_path']}")
+            else:
+                dest = send_to_cloud(int(args[0]), r["file_path"])
+                say(f"☁️  Enviado para {dest}")
         elif cmd == "cleanup":
             run_cleanup()
         elif cmd == "report":
@@ -701,8 +975,12 @@ def main(argv=None):
     folder = Path(args.watch).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
 
+    threading.Thread(target=summary_worker, daemon=True).start()
     watcher = Watcher(folder, organize_existing=args.organize_existing)
     watcher.start()
+    cloud = detect_cloud_dir() if CONFIG["cloud_bridge"] else None
+    if cloud:
+        say(f"☁️  Cloud Bridge ativo: arquivos grandes vão para {cloud / 'FileLife'}")
     say(f"👀 Monitorando {folder} em segundo plano.")
     say(f"   Configurações em {CONFIG_PATH}. Digite 'help' para ver os comandos.\n")
 

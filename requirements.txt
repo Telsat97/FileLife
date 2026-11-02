@@ -1,0 +1,2 @@
+anthropic>=2.3  # opcional: resumo com IA (função 2)
+pyzipper        # opcional: zip com senha no Arquivo Frio
