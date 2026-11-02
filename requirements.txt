@@ -1,2 +1,4 @@
-anthropic>=2.3  # opcional: resumo com IA (função 2)
-pyzipper        # opcional: zip com senha no Arquivo Frio
+anthropic>=2.3            # opcional: resumo com IA (função 2)
+google-api-python-client  # opcional: envio direto ao Google Drive (função 4)
+google-auth-oauthlib      # opcional: login do Google Drive
+pyzipper                  # opcional: zip com senha no Arquivo Frio

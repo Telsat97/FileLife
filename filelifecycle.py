@@ -78,9 +78,13 @@ DEFAULT_CONFIG = {
     "ai_categories": ["Documentos"],
     "ai_max_mb": 30,
     # Função 4: Cloud Bridge — manda arquivos grandes para a nuvem.
-    # "google_drive" (padrão) ou "outro" (OneDrive/Dropbox primeiro).
-    # cloud_dir vazio = detecta automaticamente (ex.: G:/Meu Drive).
+    # cloud_mode "api": envia direto ao Google Drive pela internet (sem instalar app;
+    #   abre no navegador). "pasta": usa a pasta do app Drive/OneDrive/Dropbox.
     "cloud_bridge": True,
+    "cloud_mode": "api",
+    "drive_folder": "FileLife",
+    # Modo "pasta": "google_drive" (padrão) ou "outro" (OneDrive/Dropbox primeiro).
+    # cloud_dir vazio = detecta automaticamente (ex.: G:/Meu Drive).
     "cloud_provider": "google_drive",
     "cloud_dir": "",
     "cloud_min_mb": 200,
@@ -174,7 +178,8 @@ def init_db():
                 bytes INTEGER DEFAULT 0
             );
         """)
-        for col in ("summary_path TEXT", "shortcut_path TEXT", "cloud INTEGER DEFAULT 0"):
+        for col in ("summary_path TEXT", "shortcut_path TEXT", "cloud INTEGER DEFAULT 0",
+                    "drive_id TEXT", "drive_link TEXT"):
             try:
                 conn.execute(f"ALTER TABLE files ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -281,8 +286,8 @@ def process_file(path):
         dup = conn.execute(
             "SELECT * FROM files WHERE sha256 = ? AND status = 'active' ORDER BY id DESC",
             (digest,)).fetchone()
-        if dup and Path(dup["file_path"]).exists():
-            if CONFIG["dedupe"] == "keep_new":
+        if dup and (dup["drive_id"] or Path(dup["file_path"]).exists()):
+            if CONFIG["dedupe"] == "keep_new" and not dup["drive_id"]:
                 Path(dup["file_path"]).unlink(missing_ok=True)
                 conn.execute("UPDATE files SET status='deleted', closed_at=? WHERE id=?",
                              (int(time.time()), dup["id"]))
@@ -440,6 +445,9 @@ def run_cleanup(verbose=True):
         return 0
 
     for r in expired:
+        if r["drive_id"]:
+            expire_drive_file(r, now)
+            continue
         p = Path(r["file_path"])
         if not p.exists():
             remove_shortcut(r["shortcut_path"])
@@ -691,8 +699,8 @@ def remove_shortcut(shortcut_path):
             p.unlink()
 
 
-def send_to_cloud(file_id, path):
-    """Move o arquivo para a pasta da nuvem e deixa um atalho no lugar."""
+def send_to_cloud_folder(file_id, path):
+    """Modo "pasta": move para a pasta sincronizada e deixa um atalho no lugar."""
     cloud_root = detect_cloud_dir()
     if cloud_root is None:
         raise ValueError("Nenhuma pasta do Google Drive/OneDrive/Dropbox encontrada. "
@@ -710,13 +718,184 @@ def send_to_cloud(file_id, path):
     return dest
 
 
+# --- Modo "api": Google Drive direto pela internet --------------------------
+
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]  # só arquivos criados pelo app
+DRIVE_CREDENTIALS = APP_DIR / "google_credentials.json"
+DRIVE_TOKEN = APP_DIR / "google_token.json"
+FOLDER_MIME = "application/vnd.google-apps.folder"
+UPLOAD_QUEUE = queue.Queue()
+
+
+def _drive_libs():
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+    except ImportError:
+        raise ValueError("instale as bibliotecas do Google: "
+                         "pip install google-api-python-client google-auth-oauthlib")
+    return Request, Credentials, InstalledAppFlow, build, MediaFileUpload
+
+
+def drive_login():
+    """Abre o navegador para você autorizar o FileLife no seu Google Drive (uma vez)."""
+    _, _, InstalledAppFlow, _, _ = _drive_libs()
+    if not DRIVE_CREDENTIALS.exists():
+        raise ValueError(f"coloque o arquivo de credenciais do Google em {DRIVE_CREDENTIALS} "
+                         "(veja o README, seção Google Drive)")
+    flow = InstalledAppFlow.from_client_secrets_file(str(DRIVE_CREDENTIALS), DRIVE_SCOPES)
+    creds = flow.run_local_server(port=0)
+    DRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+    return creds
+
+
+def drive_service():
+    Request, Credentials, _, build, _ = _drive_libs()
+    if not DRIVE_TOKEN.exists():
+        raise ValueError("Google Drive não conectado — digite 'drive login'")
+    creds = Credentials.from_authorized_user_file(str(DRIVE_TOKEN), DRIVE_SCOPES)
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            DRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+        else:
+            raise ValueError("login do Google Drive expirou — digite 'drive login'")
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+_folder_cache = {}
+
+
+def drive_folder(service, name, parent="root"):
+    """Acha (ou cria) uma pasta no Drive e devolve o ID."""
+    key = (parent, name)
+    if key in _folder_cache:
+        return _folder_cache[key]
+    safe = name.replace("\\", "\\\\").replace("'", "\\'")
+    found = service.files().list(
+        q=f"name = '{safe}' and mimeType = '{FOLDER_MIME}' and '{parent}' in parents "
+          "and trashed = false",
+        spaces="drive", fields="files(id)").execute().get("files", [])
+    if found:
+        folder_id = found[0]["id"]
+    else:
+        folder_id = service.files().create(
+            body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent]},
+            fields="id").execute()["id"]
+    _folder_cache[key] = folder_id
+    return folder_id
+
+
+def create_web_shortcut(link_path, url):
+    """Atalho que abre o arquivo no navegador (drive.google.com)."""
+    link_path = Path(link_path)
+    if sys.platform == "darwin":
+        link = unique_path(link_path.with_name(link_path.name + ".webloc"))
+        link.write_text('<?xml version="1.0" encoding="UTF-8"?>\n'
+                        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                        f'<plist version="1.0"><dict><key>URL</key><string>{url}</string>'
+                        '</dict></plist>\n', encoding="utf-8")
+    else:
+        link = unique_path(link_path.with_name(link_path.name + ".url"))
+        link.write_text(f"[InternetShortcut]\nURL={url}\n", encoding="utf-8")
+    return link
+
+
+def upload_to_drive(file_id, path):
+    """Envia o arquivo ao Google Drive, apaga a cópia local e deixa um atalho web."""
+    _, _, _, _, MediaFileUpload = _drive_libs()
+    path = Path(path)
+    service = drive_service()
+    root = drive_folder(service, CONFIG["drive_folder"])
+    parent = drive_folder(service, path.parent.name, root)
+    media = MediaFileUpload(str(path), resumable=True, chunksize=16 * 1024 * 1024)
+    request = service.files().create(body={"name": path.name, "parents": [parent]},
+                                     media_body=media, fields="id, webViewLink")
+    result = None
+    while result is None:
+        _, result = request.next_chunk()
+    media.stream().close()  # libera o arquivo (necessário no Windows antes de apagar)
+    size = path.stat().st_size
+    path.unlink()
+    shortcut = create_web_shortcut(path, result["webViewLink"])
+    with DB_LOCK, db() as conn:
+        conn.execute("UPDATE files SET file_path=?, shortcut_path=?, cloud=1, drive_id=?, "
+                     "drive_link=? WHERE id=?",
+                     (f"gdrive://{CONFIG['drive_folder']}/{path.parent.name}/{path.name}",
+                      str(shortcut), result["id"], result["webViewLink"], file_id))
+    log_action(f"Google Drive #{file_id}: {path.name} -> {result['webViewLink']}")
+    say(f"☁️  #{file_id} {path.name} ({human_size(size)}) enviado ao Google Drive — "
+        f"abra com 'open {file_id}'")
+    return result["webViewLink"]
+
+
+def expire_drive_file(row, now):
+    """Expiração de arquivo que está no Drive: move para _ArquivoFrio ou manda pra lixeira."""
+    try:
+        service = drive_service()
+        if CONFIG["on_expire"] == "archive":
+            root = drive_folder(service, CONFIG["drive_folder"])
+            cold = drive_folder(service, "_ArquivoFrio", root)
+            parents = service.files().get(fileId=row["drive_id"], fields="parents").execute()
+            service.files().update(fileId=row["drive_id"], addParents=cold,
+                                   removeParents=",".join(parents.get("parents", [])),
+                                   fields="id").execute()
+            status, kind, msg = "archived", "archived", "movido para _ArquivoFrio no Drive"
+        else:
+            service.files().update(fileId=row["drive_id"], body={"trashed": True}).execute()
+            status, kind, msg = "deleted", "deleted", "enviado para a lixeira do Drive"
+    except ValueError as e:
+        _warn_once("drive", f"☁️  Google Drive: {e}")
+        return
+    except Exception as e:  # erro de rede/API: tenta de novo na próxima limpeza
+        log_action(f"Expirar #{row['id']} no Drive falhou: {e!r}")
+        return
+    remove_shortcut(row["shortcut_path"])
+    if row["summary_path"]:
+        Path(row["summary_path"]).unlink(missing_ok=True)
+    with DB_LOCK, db() as conn:
+        conn.execute("UPDATE files SET status=?, closed_at=? WHERE id=?", (status, now, row["id"]))
+        add_event(conn, kind, row["id"], 0)
+    log_action(f"#{row['id']} expirou: {msg}")
+    say(f"🧊 #{row['id']} {row['new_name']} expirou → {msg}")
+
+
+def upload_worker():
+    """Uploads rodam numa thread própria (vídeos grandes demoram)."""
+    while True:
+        file_id, path = UPLOAD_QUEUE.get()
+        try:
+            upload_to_drive(file_id, path)
+        except ValueError as e:
+            _warn_once("drive", f"☁️  Google Drive: {e}")
+        except Exception as e:
+            log_action(f"Upload #{file_id} falhou: {e!r}")
+            say(f"❌ Upload de #{file_id} para o Drive falhou (o arquivo continua no PC): {e}")
+
+
+# --- Escolha do modo ---------------------------------------------------------
+
+def send_to_cloud(file_id, path):
+    if CONFIG.get("cloud_mode", "api") == "api":
+        return upload_to_drive(file_id, path)
+    return send_to_cloud_folder(file_id, path)
+
+
 def maybe_send_to_cloud(file_id, path, category, size):
     if not CONFIG["cloud_bridge"] or category not in CONFIG["cloud_categories"]:
         return None
     if size < CONFIG["cloud_min_mb"] * 1024 * 1024:
         return None
+    if CONFIG.get("cloud_mode", "api") == "api":
+        UPLOAD_QUEUE.put((file_id, path))
+        say(f"☁️  #{file_id} na fila de envio para o Google Drive...")
+        return "queued"
     try:
-        dest = send_to_cloud(file_id, path)
+        dest = send_to_cloud_folder(file_id, path)
     except ValueError as e:
         _warn_once("cloud", f"☁️  Cloud Bridge: {e}")
         return None
@@ -872,6 +1051,8 @@ HELP = """Comandos:
   archive <id>           mostra onde está o zip e a senha
   summary <id>           gera/regera o resumo com IA
   cloud <id>             envia para a nuvem e deixa um atalho
+  open <id>              abre o arquivo (no navegador, se estiver no Drive)
+  drive login            conecta sua conta do Google Drive (abre o navegador)
   cleanup                processa expirados agora
   report [dias]          gera relatório (padrão 7 dias)
   help | quit"""
@@ -961,6 +1142,19 @@ def handle_command(line):
             say("🧠 Resumindo...")
             if not summarize_file(int(args[0])):
                 say("Não foi possível resumir (formato não suportado, IA desativada ou erro — veja o log).")
+        elif cmd == "drive" and args[:1] == ["login"]:
+            say("🌐 Abrindo o navegador para você autorizar o FileLife no Google Drive...")
+            drive_login()
+            say("✅ Google Drive conectado!")
+        elif cmd == "open" and len(args) == 1:
+            import webbrowser
+            with DB_LOCK, db() as conn:
+                r = conn.execute("SELECT file_path, drive_link FROM files WHERE id=?",
+                                 (int(args[0]),)).fetchone()
+            if not r:
+                say("Arquivo não encontrado.")
+            else:
+                webbrowser.open(r["drive_link"] or Path(r["file_path"]).as_uri())
         elif cmd == "cloud" and len(args) == 1:
             with DB_LOCK, db() as conn:
                 r = conn.execute("SELECT file_path, cloud FROM files WHERE id=? AND status='active'",
@@ -970,8 +1164,9 @@ def handle_command(line):
             elif r["cloud"]:
                 say(f"☁️  Já está na nuvem: {r['file_path']}")
             else:
+                say("☁️  Enviando...")
                 dest = send_to_cloud(int(args[0]), r["file_path"])
-                say(f"☁️  Enviado para {dest}")
+                say(f"☁️  Enviado: {dest}")
         elif cmd == "cleanup":
             run_cleanup()
         elif cmd == "report":
@@ -981,6 +1176,9 @@ def handle_command(line):
             say(HELP)
     except ValueError as e:
         say(f"⚠️  {e}")
+    except Exception as e:  # erro de rede/API não derruba o programa
+        log_action(f"Erro no comando {line!r}: {e!r}")
+        say(f"❌ Erro: {e}")
     return True
 
 
@@ -1001,9 +1199,16 @@ def main(argv=None):
     threading.Thread(target=summary_worker, daemon=True).start()
     watcher = Watcher(folder, organize_existing=args.organize_existing)
     watcher.start()
-    cloud = detect_cloud_dir() if CONFIG["cloud_bridge"] else None
-    if cloud:
-        say(f"☁️  Cloud Bridge ativo: arquivos grandes vão para {cloud / 'FileLife'}")
+    threading.Thread(target=upload_worker, daemon=True).start()
+    if CONFIG["cloud_bridge"] and CONFIG.get("cloud_mode", "api") == "api":
+        if DRIVE_TOKEN.exists():
+            say("☁️  Google Drive conectado: arquivos grandes vão para o Drive.")
+        else:
+            say("☁️  Para mandar arquivos grandes ao Google Drive, digite 'drive login'.")
+    elif CONFIG["cloud_bridge"]:
+        cloud = detect_cloud_dir()
+        if cloud:
+            say(f"☁️  Cloud Bridge ativo: arquivos grandes vão para {cloud / 'FileLife'}")
     say(f"👀 Monitorando {folder} em segundo plano.")
     say(f"   Configurações em {CONFIG_PATH}. Digite 'help' para ver os comandos.\n")
 

@@ -32,6 +32,8 @@ Ele não pergunta nada a cada download: cada categoria tem um prazo padrão (edi
 | `archive <id>` | local do zip e senha |
 | `summary <id>` | gera ou refaz o resumo com IA |
 | `cloud <id>` | envia para a nuvem e deixa um atalho |
+| `open <id>` | abre o arquivo (no navegador, se estiver no Drive) |
+| `drive login` | conecta sua conta do Google Drive |
 | `cleanup` | processa expirados agora |
 | `report [dias]` | gera relatório de produtividade |
 
@@ -60,11 +62,23 @@ Todas implementadas ✅
 
 **Resumo com IA.** PDFs, `.docx` e arquivos de texto da categoria Documentos são resumidos em 3 tópicos pelo Claude (modelo `claude-opus-5-5`, configurável em `ai_model`). O resumo fica salvo em `<arquivo>.resumo.md`, ao lado do original. Ele roda em segundo plano, sem travar o monitor. O fallback automático da API (`fallbacks: "default"`) está ativado: se o modelo recusar um conteúdo, outro modelo tenta resumir. Arquivos acima de `ai_max_mb` (padrão 30 MB) são pulados. Para desligar, use `"ai_summary": false`.
 
-**Cloud Bridge (Google Drive).** Vídeos e arquivos compactados acima de `cloud_min_mb` (padrão 200 MB) vão para `Meu Drive/FileLife/<Categoria>` no Google Drive. No lugar do arquivo fica um atalho: `.url` no Windows e link simbólico no Mac/Linux. Quando expiram, eles são arquivados em `Meu Drive/FileLife/_ArquivoFrio`, sem voltar para o disco.
+**Cloud Bridge (Google Drive).** Vídeos e arquivos compactados acima de `cloud_min_mb` (padrão 200 MB) são **enviados direto para o seu Google Drive pela internet**, sem precisar instalar o app do Drive. Eles ficam em `Meu Drive/FileLife/<Categoria>`, a cópia local é apagada e, no lugar, fica um atalho que abre o arquivo no navegador (drive.google.com). Você também pode abrir com o comando `open <id>`. Os envios rodam em segundo plano. Se um envio falhar, o arquivo continua no PC.
 
-Como configurar:
-1. Instale o **Google Drive para computador**: https://www.google.com/drive/download/
-2. Faça login. Em Configurações → Google Drive, escolha **"Fazer streaming de arquivos"**. Nesse modo, os arquivos ficam só na nuvem e não ocupam o SSD.
-3. Pronto. O FileLife encontra a unidade (geralmente `G:\Meu Drive`) sozinho. Se não encontrar, defina `"cloud_dir": "G:/Meu Drive"` em `~/.filelife/config.json`.
+Quando expiram, os arquivos vão para `Meu Drive/FileLife/_ArquivoFrio` (`on_expire: "archive"`) ou para a lixeira do Drive (`"delete"`), onde dá para recuperar por 30 dias.
 
-Para usar OneDrive ou Dropbox em vez do Google Drive, defina `"cloud_provider": "outro"`. Para mandar mais coisas para a nuvem, diminua `cloud_min_mb` ou acrescente categorias em `cloud_categories`.
+O FileLife só consegue ver e mexer nos arquivos que ele mesmo enviou (permissão `drive.file`). O resto do seu Drive fica inacessível para ele.
+
+### Configurar o Google Drive (uma vez, ~5 min)
+
+1. Acesse https://console.cloud.google.com/ e crie um projeto (ex.: "FileLife").
+2. Em **APIs e serviços → Biblioteca**, ative a **Google Drive API**.
+3. Em **APIs e serviços → Tela de permissão OAuth**, escolha "Externo", preencha o nome do app e o seu e-mail e, em **Usuários de teste**, adicione o seu Gmail.
+4. Em **APIs e serviços → Credenciais → Criar credenciais → ID do cliente OAuth**, escolha o tipo **"App para computador"**.
+5. Baixe o JSON e salve em `~/.filelife/google_credentials.json` (no Windows: `C:\Users\SEU_USUARIO\.filelife\google_credentials.json`).
+6. Rode `pip install -r requirements.txt`, abra o FileLife e digite `drive login`. O navegador abre, você entra na sua conta Google e autoriza. Pronto: o login fica salvo.
+
+> Para vender o produto: os passos 1 a 5 são feitos **só por você**, e o seu `google_credentials.json` vai junto com o programa. Seus clientes só fazem o passo 6 (login no navegador). Com mais de 100 usuários, publique o app na tela de permissão OAuth.
+
+**Alternativa com o app do Drive instalado:** defina `"cloud_mode": "pasta"`. Nesse modo, o FileLife usa a pasta sincronizada (`G:\Meu Drive`, OneDrive ou Dropbox) em vez da API. Configure o app em "Fazer streaming de arquivos" para os arquivos não ocuparem o SSD. Para preferir OneDrive ou Dropbox, defina `"cloud_provider": "outro"`.
+
+Para mandar mais coisas para a nuvem, diminua `cloud_min_mb` ou acrescente categorias em `cloud_categories`.
